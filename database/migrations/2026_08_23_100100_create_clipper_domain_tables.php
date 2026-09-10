@@ -10,13 +10,48 @@ return new class extends Migration
     {
         Schema::create('social_accounts', function (Blueprint $table): void {
             $table->id();
-            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
             $table->string('name');
-            $table->string('handle');
+            $table->string('email')->nullable()->unique();
+            $table->string('handle')->unique();
             $table->string('platform')->default('tiktok');
             $table->string('status')->default('review');
+            $table->string('avatar_url')->nullable();
+            $table->string('bank_name')->nullable();
+            $table->string('bank_account_number')->nullable();
+            $table->string('bank_account_name')->nullable();
             $table->unsignedBigInteger('balance')->default(0);
             $table->timestamps();
+        });
+
+        Schema::create('social_account_user', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('social_account_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->string('access_type')->default('owner');
+            $table->string('status')->default('active');
+            $table->timestamps();
+
+            $table->unique(['social_account_id', 'user_id']);
+        });
+
+        Schema::create('brands', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->string('name');
+            $table->string('handle')->unique();
+            $table->string('status')->default('active');
+            $table->timestamps();
+        });
+
+        Schema::create('brand_user', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('brand_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->string('access_type')->default('member');
+            $table->string('status')->default('pending');
+            $table->timestamps();
+
+            $table->unique(['brand_id', 'user_id']);
         });
 
         Schema::create('campaigns', function (Blueprint $table): void {
@@ -112,6 +147,9 @@ return new class extends Migration
         Schema::dropIfExists('withdrawals');
         Schema::dropIfExists('incomes');
         Schema::dropIfExists('campaign_submissions');
+        Schema::dropIfExists('brand_user');
+        Schema::dropIfExists('brands');
+        Schema::dropIfExists('social_account_user');
         Schema::dropIfExists('campaigns');
         Schema::dropIfExists('social_accounts');
     }

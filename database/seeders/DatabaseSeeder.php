@@ -3,9 +3,11 @@
 namespace Database\Seeders;
 
 use App\Models\Announcement;
+use App\Models\Brand;
 use App\Models\Campaign;
 use App\Models\Course;
 use App\Models\Income;
+use App\Models\Role;
 use App\Models\SocialAccount;
 use App\Models\User;
 use Illuminate\Database\Seeder;
@@ -16,18 +18,18 @@ class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
+        $this->call(RoleSeeder::class);
+
         $user = $this->seedUser(
             ['email' => 'alya@example.com'],
             [
                 'name' => 'Alya Pramesti',
                 'handle' => '@alya.clip',
-                'bank_name' => 'BCA',
-                'bank_account_number' => '1234567890',
-                'bank_account_name' => 'Alya Pramesti',
             ],
         );
 
         $accounts = $this->seedAccounts($user, [
+            ['name' => 'Alya Pramesti Main', 'handle' => '@alya.clip', 'status' => 'active', 'balance' => 0, 'bank_name' => 'BCA', 'bank_account_number' => '1234567890', 'bank_account_name' => 'Alya Pramesti'],
             ['name' => 'Tongkrongan Main', 'handle' => '@tongkrongan.clip', 'status' => 'active', 'balance' => 18450000],
             ['name' => 'Clipper Food', 'handle' => '@clipper.foodies', 'status' => 'review', 'balance' => 6280000],
             ['name' => 'Daily Finds', 'handle' => '@dailyfinds.id', 'status' => 'active', 'balance' => 11720000],
@@ -38,13 +40,11 @@ class DatabaseSeeder extends Seeder
             [
                 'name' => 'Raka Mahendra',
                 'handle' => '@rakamhd',
-                'bank_name' => 'Mandiri',
-                'bank_account_number' => '9876543210',
-                'bank_account_name' => 'Raka Mahendra',
             ],
         );
 
         $rakaAccounts = $this->seedAccounts($raka, [
+            ['name' => 'Raka Mahendra Main', 'handle' => '@rakamhd', 'platform' => 'tiktok', 'status' => 'active', 'balance' => 0, 'bank_name' => 'Mandiri', 'bank_account_number' => '9876543210', 'bank_account_name' => 'Raka Mahendra'],
             ['name' => 'Raka Gaming Clips', 'handle' => '@raka.gaming', 'platform' => 'tiktok', 'status' => 'active', 'balance' => 7420000],
             ['name' => 'Raka Review ID', 'handle' => '@raka.review', 'platform' => 'instagram', 'status' => 'active', 'balance' => 3180000],
         ]);
@@ -54,16 +54,76 @@ class DatabaseSeeder extends Seeder
             [
                 'name' => 'Nina Saras',
                 'handle' => '@ninasaras.id',
-                'bank_name' => 'BNI',
-                'bank_account_number' => '4561237890',
-                'bank_account_name' => 'Nina Saras',
             ],
         );
 
         $ninaAccounts = $this->seedAccounts($nina, [
+            ['name' => 'Nina Saras Main', 'handle' => '@ninasaras.id', 'platform' => 'tiktok', 'status' => 'active', 'balance' => 0, 'bank_name' => 'BNI', 'bank_account_number' => '4561237890', 'bank_account_name' => 'Nina Saras'],
             ['name' => 'Nina Beauty Lab', 'handle' => '@nina.beauty', 'platform' => 'tiktok', 'status' => 'active', 'balance' => 5180000],
             ['name' => 'Nina Daily Shorts', 'handle' => '@nina.shorts', 'platform' => 'youtube', 'status' => 'review', 'balance' => 920000],
         ]);
+
+        $brandUser = $this->seedUser(
+            ['email' => 'brand@example.com'],
+            [
+                'name' => 'Brand Demo',
+                'handle' => '@brand.demo',
+                'role' => 'brand',
+            ],
+        );
+        $this->seedAccounts($brandUser, [
+            ['name' => 'Brand Demo Official', 'handle' => '@brand.demo.official', 'platform' => 'instagram', 'status' => 'active', 'balance' => 0, 'bank_name' => 'BCA', 'bank_account_number' => '1122334455', 'bank_account_name' => 'Brand Demo'],
+        ]);
+        $brand = $this->seedBrand($brandUser, [
+            'name' => 'Brand Demo',
+            'handle' => '@brand.demo',
+            'status' => 'active',
+        ]);
+        $this->attachBrandMember($brand, $user, 'active');
+        $this->attachBrandMember($brand, $raka, 'active');
+        $this->attachBrandMember($brand, $nina, 'active');
+
+        $dummyCreators = [
+            ['name' => 'Dimas Nugraha', 'email' => 'dimas.creator@example.com', 'handle' => '@dimas.creator'],
+            ['name' => 'Sinta Maharani', 'email' => 'sinta.creator@example.com', 'handle' => '@sinta.creator'],
+            ['name' => 'Bayu Prakoso', 'email' => 'bayu.creator@example.com', 'handle' => '@bayu.creator'],
+            ['name' => 'Maya Kirana', 'email' => 'maya.creator@example.com', 'handle' => '@maya.creator'],
+            ['name' => 'Fajar Santoso', 'email' => 'fajar.creator@example.com', 'handle' => '@fajar.creator'],
+        ];
+
+        foreach ($dummyCreators as $creator) {
+            $creatorUser = $this->seedUser(
+                ['email' => $creator['email']],
+                [
+                    'name' => $creator['name'],
+                    'handle' => $creator['handle'],
+                    'role' => 'creator',
+                ],
+            );
+            $bankAccountNumber = fake()->numerify('##########');
+
+            $this->seedAccounts($creatorUser, [
+                [
+                    'name' => "{$creator['name']} Main",
+                    'handle' => $creator['handle'],
+                    'platform' => 'tiktok',
+                    'status' => 'active',
+                    'balance' => 0,
+                    'bank_name' => 'BCA',
+                    'bank_account_number' => $bankAccountNumber,
+                    'bank_account_name' => $creator['name'],
+                ],
+                [
+                    'name' => "{$creator['name']} TikTok",
+                    'handle' => "{$creator['handle']}.tt",
+                    'platform' => 'tiktok',
+                    'status' => 'active',
+                    'balance' => fake()->numberBetween(500000, 4500000),
+                ],
+            ]);
+
+            $this->attachBrandMember($brand, $creatorUser, $creator['email'] === 'dimas.creator@example.com' ? 'pending' : 'active');
+        }
 
         $campaigns = [
             ['slug' => 'sulianto-indria-putra', 'title' => 'Sulianto Indria Putra', 'brand' => 'Suli', 'image_url' => 'https://images.unsplash.com/photo-1590602847861-f357a9332bbc?auto=format&fit=crop&w=1000&q=80', 'rate_per_view' => 7500, 'category' => 'EDUCATION', 'budget_percent' => 39, 'deadline_at' => '2026-09-05', 'views_target' => 6821, 'type' => 'CLIPPING', 'exclusive' => true],
@@ -166,31 +226,128 @@ class DatabaseSeeder extends Seeder
         ] as $course) {
             Course::updateOrCreate(['title' => $course['title']], $course);
         }
+
+        $this->ensureCreatorUserHandlesHaveSocialAccounts();
+        $this->ensureEveryUserHasSocialAccount();
     }
 
     private function seedUser(array $lookup, array $attributes): User
     {
+        $role = $attributes['role'] ?? 'creator';
+        Role::firstOrCreate(['slug' => $role], ['name' => Str::headline($role)]);
+        $userAttributes = collect($attributes)
+            ->except(['avatar_url', 'bank_name', 'bank_account_number', 'bank_account_name'])
+            ->all();
+
         return User::updateOrCreate(
             $lookup,
             [
                 'password' => Hash::make('password'),
-                'role' => 'clipper',
+                'role' => $role,
                 'status' => 'active',
+                'onboarding_completed' => true,
                 'api_token' => Str::random(60),
-                ...$attributes,
+                ...$userAttributes,
             ],
         );
     }
 
     private function seedAccounts(User $user, array $accounts)
     {
-        return collect($accounts)->map(fn (array $account) => SocialAccount::updateOrCreate(
-            ['handle' => $account['handle']],
+        return collect($accounts)->map(function (array $account) use ($user) {
+            if (($account['handle'] ?? null) === $user->handle && empty($account['email'])) {
+                $account['email'] = $user->email;
+            }
+
+            $socialAccount = SocialAccount::updateOrCreate(
+                ['handle' => $account['handle']],
+                [
+                    'platform' => 'tiktok',
+                    ...$account,
+                ],
+            );
+
+            $user->socialAccounts()->syncWithoutDetaching([
+                $socialAccount->id => [
+                    'access_type' => $account['access_type'] ?? 'owner',
+                    'status' => $account['pivot_status'] ?? 'active',
+                ],
+            ]);
+
+            return $socialAccount;
+        });
+    }
+
+    private function seedBrand(User $owner, array $attributes): Brand
+    {
+        $brand = Brand::updateOrCreate(
+            ['handle' => $attributes['handle']],
             [
-                'user_id' => $user->id,
-                'platform' => 'tiktok',
-                ...$account,
+                'user_id' => $owner->id,
+                ...$attributes,
             ],
-        ));
+        );
+
+        $this->attachBrandMember($brand, $owner, 'active', 'owner');
+
+        return $brand;
+    }
+
+    private function attachBrandMember(Brand $brand, User $user, string $status = 'pending', string $accessType = 'member'): void
+    {
+        $brand->members()->syncWithoutDetaching([
+            $user->id => [
+                'access_type' => $accessType,
+                'status' => $status,
+            ],
+        ]);
+    }
+
+    private function ensureEveryUserHasSocialAccount(): void
+    {
+        User::doesntHave('socialAccounts')->get()->each(function (User $user): void {
+            $handle = $user->handle ?: '@'.Str::slug($user->name, '.');
+            $socialHandle = '@'.ltrim($handle, '@').'.social';
+
+            $socialAccount = SocialAccount::updateOrCreate(
+                ['handle' => $socialHandle],
+                [
+                    'name' => "{$user->name} Social",
+                    'email' => $user->email,
+                    'platform' => $user->role === 'brand' ? 'instagram' : 'tiktok',
+                    'status' => 'active',
+                    'balance' => 0,
+                ],
+            );
+
+            $user->socialAccounts()->syncWithoutDetaching([
+                $socialAccount->id => ['access_type' => 'owner', 'status' => 'active'],
+            ]);
+        });
+    }
+
+    private function ensureCreatorUserHandlesHaveSocialAccounts(): void
+    {
+        User::where('role', 'creator')
+            ->whereNotNull('handle')
+            ->get()
+            ->each(function (User $user): void {
+                $socialAccount = SocialAccount::updateOrCreate(
+                    [
+                        'handle' => $user->handle,
+                    ],
+                    [
+                        'name' => "{$user->name} Main",
+                        'email' => $user->email,
+                        'platform' => 'tiktok',
+                        'status' => 'active',
+                        'balance' => 0,
+                    ],
+                );
+
+                $user->socialAccounts()->syncWithoutDetaching([
+                    $socialAccount->id => ['access_type' => 'owner', 'status' => 'active'],
+                ]);
+            });
     }
 }

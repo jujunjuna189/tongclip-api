@@ -17,10 +17,7 @@ use Illuminate\Notifications\Notifiable;
     'handle',
     'role',
     'status',
-    'avatar_url',
-    'bank_name',
-    'bank_account_number',
-    'bank_account_name',
+    'onboarding_completed',
     'api_token',
 ])]
 #[Hidden(['password', 'remember_token', 'api_token'])]
@@ -31,7 +28,26 @@ class User extends Authenticatable
 
     public function socialAccounts()
     {
-        return $this->hasMany(SocialAccount::class);
+        return $this->belongsToMany(SocialAccount::class)
+            ->withPivot(['access_type', 'status'])
+            ->withTimestamps();
+    }
+
+    public function roleMaster()
+    {
+        return $this->belongsTo(Role::class, 'role', 'slug');
+    }
+
+    public function ownedBrands()
+    {
+        return $this->hasMany(Brand::class);
+    }
+
+    public function brands()
+    {
+        return $this->belongsToMany(Brand::class)
+            ->withPivot(['access_type', 'status'])
+            ->withTimestamps();
     }
 
     public function submissions()
@@ -53,6 +69,7 @@ class User extends Authenticatable
     {
         return [
             'email_verified_at' => 'datetime',
+            'onboarding_completed' => 'boolean',
             'password' => 'hashed',
         ];
     }

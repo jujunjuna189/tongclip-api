@@ -10,12 +10,9 @@ return new class extends Migration
     {
         Schema::table('users', function (Blueprint $table): void {
             $table->string('handle')->nullable()->unique()->after('email');
-            $table->string('role')->default('clipper')->after('handle');
+            $table->string('role')->default('creator')->after('handle');
             $table->string('status')->default('review')->after('role');
-            $table->string('avatar_url')->nullable()->after('status');
-            $table->string('bank_name')->nullable()->after('avatar_url');
-            $table->string('bank_account_number')->nullable()->after('bank_name');
-            $table->string('bank_account_name')->nullable()->after('bank_account_number');
+            $table->boolean('onboarding_completed')->default(false)->after('status');
             $table->string('api_token', 80)->nullable()->unique()->after('remember_token');
         });
     }
@@ -27,10 +24,7 @@ return new class extends Migration
                 'handle',
                 'role',
                 'status',
-                'avatar_url',
-                'bank_name',
-                'bank_account_number',
-                'bank_account_name',
+                'onboarding_completed',
                 'api_token',
             ]);
         });

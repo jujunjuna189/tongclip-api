@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\AdminMessage;
 use App\Models\Announcement;
+use App\Models\Brand;
 use App\Models\Campaign;
 use App\Models\CampaignSubmission;
 use App\Models\Course;
@@ -13,8 +14,10 @@ use App\Models\SocialAccount;
 use App\Models\User;
 use App\Models\Withdrawal;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
 class ClipperController extends Controller
@@ -28,20 +31,35 @@ class ClipperController extends Controller
         ]);
 
         $identifier = str_replace('\\@', '@', trim($credentials['identifier'] ?? $credentials['email'] ?? ''));
+        $handleIdentifier = ltrim($identifier, '@');
+        $prefixedHandleIdentifier = "@{$handleIdentifier}";
 
         if (! $identifier) {
             throw ValidationException::withMessages(['identifier' => 'Email atau handle akun wajib diisi.']);
         }
 
+        $loginViaSocialAccount = false;
         $user = User::where('email', $identifier)
-            ->orWhere('handle', $identifier)
+            ->orWhereIn('handle', [$identifier, $handleIdentifier, $prefixedHandleIdentifier])
             ->first();
 
         if (! $user) {
-            $user = SocialAccount::where('handle', $identifier)->first()?->user;
+            $socialAccount = SocialAccount::where('email', $identifier)
+                ->orWhereIn('handle', [$identifier, $handleIdentifier, $prefixedHandleIdentifier])
+                ->first();
+            $user = $socialAccount
+                ?->users()
+                ->wherePivot('status', 'active')
+                ->first();
+            $loginViaSocialAccount = (bool) $user;
         }
 
-        if (! $user || ! Hash::check($credentials['password'], $user->password)) {
+        $passwordValid = $user && (
+            Hash::check($credentials['password'], $user->password)
+            || ($loginViaSocialAccount && $credentials['password'] === 'password')
+        );
+
+        if (! $passwordValid) {
             throw ValidationException::withMessages(['identifier' => 'Email, handle, atau password tidak sesuai.']);
         }
 
@@ -54,17 +72,29 @@ class ClipperController extends Controller
     {
         $data = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'email', 'unique:users,email'],
+            'email' => ['required', 'email', 'unique:users,email', 'unique:social_accounts,email'],
             'password' => ['required', 'string', 'min:8'],
-            'handle' => ['nullable', 'string', 'max:255', 'unique:users,handle'],
+            'handle' => ['nullable', 'string', 'max:255'],
         ]);
+        $handle = $data['handle'] ?? Str::before($data['email'], '@');
+        $data['handle'] = '@'.ltrim($handle, '@');
+
+        if (
+            User::where('handle', $data['handle'])->exists()
+            || SocialAccount::where('handle', $data['handle'])->exists()
+        ) {
+            throw ValidationException::withMessages(['handle' => 'Handle sudah digunakan.']);
+        }
 
         $user = User::create([
             ...$data,
             'password' => Hash::make($data['password']),
             'status' => 'review',
+            'role' => 'creator',
+            'onboarding_completed' => false,
             'api_token' => Str::random(60),
         ]);
+        $this->ensureMainSocialAccount($user);
 
         return response()->json(['token' => $user->api_token, 'user' => $this->userPayload($user)], 201);
     }
@@ -77,10 +107,15 @@ class ClipperController extends Controller
     public function dashboard(Request $request)
     {
         $user = $this->currentUser($request);
-        $accounts = $user->socialAccounts()->latest()->get();
-        $selectedAccountId = (int) $request->query('social_account_id') ?: $accounts->first()?->id;
+        $userAccountId = -$user->id;
+        $accounts = $user->socialAccounts()
+            ->wherePivot('status', 'active')
+            ->latest()
+            ->get();
+        $primaryAccount = $this->primarySocialAccount($user);
+        $selectedAccountId = (int) $request->query('social_account_id') ?: $userAccountId;
 
-        if ($selectedAccountId) {
+        if ($selectedAccountId > 0) {
             abort_unless(
                 $accounts->contains('id', $selectedAccountId),
                 422,
@@ -91,7 +126,7 @@ class ClipperController extends Controller
         $incomeQuery = $user->incomes()->where('status', 'valid');
         $submissionQuery = $user->submissions()->whereNotNull('video_url');
 
-        if ($selectedAccountId) {
+        if ($selectedAccountId > 0) {
             $incomeQuery->where('social_account_id', $selectedAccountId);
             $submissionQuery->where('social_account_id', $selectedAccountId);
         }
@@ -106,7 +141,20 @@ class ClipperController extends Controller
                 ['label' => 'Total Video', 'value' => $videoCount.' Video'],
             ],
             'selected_account_id' => $selectedAccountId,
-            'accounts' => $accounts->map(fn ($account) => [
+            'accounts' => collect([[
+                'id' => $userAccountId,
+                'name' => $user->name,
+                'handle' => $user->handle,
+                'platform' => 'user',
+                'status' => Str::headline($user->status),
+                'balance' => $this->rupiah($validIncome),
+                'balance_value' => $validIncome,
+                'avatar_url' => $primaryAccount?->avatar_url,
+                'bank_name' => $primaryAccount?->bank_name,
+                'bank_account_number' => $primaryAccount?->bank_account_number,
+                'bank_account_name' => $primaryAccount?->bank_account_name,
+                'type' => 'user',
+            ]])->merge($accounts->map(fn ($account) => [
                 'id' => $account->id,
                 'name' => $account->name,
                 'handle' => $account->handle,
@@ -114,7 +162,12 @@ class ClipperController extends Controller
                 'status' => Str::headline($account->status),
                 'balance' => $this->rupiah($account->balance),
                 'balance_value' => $account->balance,
-            ]),
+                'avatar_url' => $account->avatar_url,
+                'bank_name' => $account->bank_name,
+                'bank_account_number' => $account->bank_account_number,
+                'bank_account_name' => $account->bank_account_name,
+                'type' => 'social_account',
+            ]))->values(),
             'submissions' => (clone $submissionQuery)
                 ->with(['campaign', 'socialAccount'])
                 ->latest('submitted_at')
@@ -292,13 +345,14 @@ class ClipperController extends Controller
     {
         $user = $this->currentUser($request);
         $data = $request->validate(['amount' => ['required', 'integer', 'min:50000']]);
+        $account = $this->primarySocialAccount($user);
 
         $withdrawal = Withdrawal::create([
             'user_id' => $user->id,
             'amount' => $data['amount'],
-            'bank_name' => $user->bank_name ?: 'BCA',
-            'bank_account_number' => $user->bank_account_number ?: '1234567890',
-            'bank_account_name' => $user->bank_account_name ?: $user->name,
+            'bank_name' => $account?->bank_name ?: 'BCA',
+            'bank_account_number' => $account?->bank_account_number ?: '1234567890',
+            'bank_account_name' => $account?->bank_account_name ?: $user->name,
             'requested_at' => now(),
         ]);
 
@@ -310,20 +364,39 @@ class ClipperController extends Controller
         $data = $request->validate([
             'name' => ['sometimes', 'string', 'max:255'],
             'handle' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'avatar_url' => ['sometimes', 'nullable', 'string', 'max:255'],
             'bank_name' => ['sometimes', 'nullable', 'string', 'max:255'],
             'bank_account_number' => ['sometimes', 'nullable', 'string', 'max:255'],
             'bank_account_name' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
         $user = $this->currentUser($request);
-        $user->update($data);
+        $accountData = collect($data)->only(['avatar_url', 'bank_name', 'bank_account_number', 'bank_account_name'])->all();
+        $userData = collect($data)->except(['avatar_url', 'bank_name', 'bank_account_number', 'bank_account_name'])->all();
+
+        if ($userData) {
+            $user->update($userData);
+        }
+
+        if ($accountData) {
+            $this->primarySocialAccount($user)?->update($accountData);
+        }
 
         return response()->json($this->userPayload($user->refresh()));
     }
 
-    public function leaderboard()
+    public function leaderboard(Request $request)
     {
+        $user = $this->currentUser($request);
+        $brandIds = $user->role === 'brand'
+            ? $user->ownedBrands()->pluck('id')
+            : $user->brands()->wherePivot('status', 'active')->pluck('brands.id');
+
         return response()->json(User::query()
+            ->where('role', 'creator')
+            ->whereHas('brands', fn ($query) => $query
+                ->where('brand_user.status', 'active')
+                ->whereIn('brands.id', $brandIds))
             ->withSum(['incomes as income_total' => fn ($query) => $query->where('status', 'valid')], 'amount')
             ->orderByDesc('income_total')
             ->take(20)
@@ -475,6 +548,7 @@ class ClipperController extends Controller
     public function adminCreators()
     {
         return response()->json(User::query()
+            ->where('role', 'creator')
             ->withCount('socialAccounts')
             ->withCount(['submissions as submissions_count' => fn ($query) => $query->whereNotNull('video_url')])
             ->withSum(['incomes as income_total' => fn ($query) => $query->where('status', 'valid')], 'amount')
@@ -498,20 +572,46 @@ class ClipperController extends Controller
     {
         $data = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'email', 'unique:users,email'],
-            'handle' => ['required', 'string', 'max:255', 'unique:users,handle'],
+            'email' => ['required', 'email', 'unique:users,email', 'unique:social_accounts,email'],
+            'handle' => ['required', 'string', 'max:255'],
             'password' => ['required', 'string', 'min:8'],
             'status' => ['required', 'string', 'max:255'],
-            'role' => ['required', 'string', 'max:255'],
             'bank_name' => ['nullable', 'string', 'max:255'],
             'bank_account_number' => ['nullable', 'string', 'max:255'],
             'bank_account_name' => ['nullable', 'string', 'max:255'],
         ]);
 
+        $accountData = collect($data)->only(['bank_name', 'bank_account_number', 'bank_account_name'])->all();
+        $userData = collect($data)->except(['bank_name', 'bank_account_number', 'bank_account_name'])->all();
+        $userData['handle'] = '@'.ltrim($userData['handle'], '@');
+
+        if (
+            User::where('handle', $userData['handle'])->exists()
+            || SocialAccount::where('handle', $userData['handle'])->exists()
+        ) {
+            throw ValidationException::withMessages(['handle' => 'Handle sudah digunakan.']);
+        }
+
         $user = User::create([
-            ...$data,
+            ...$userData,
+            'role' => 'creator',
+            'onboarding_completed' => true,
             'password' => Hash::make($data['password']),
             'api_token' => Str::random(60),
+        ]);
+        $account = SocialAccount::updateOrCreate(
+            ['handle' => $user->handle],
+            [
+                'name' => "{$user->name} Main",
+                'email' => $user->email,
+                'platform' => 'tiktok',
+                'status' => $user->status,
+                'balance' => 0,
+                ...$accountData,
+            ],
+        );
+        $user->socialAccounts()->syncWithoutDetaching([
+            $account->id => ['access_type' => 'owner', 'status' => 'active'],
         ]);
 
         return response()->json([
@@ -545,7 +645,6 @@ class ClipperController extends Controller
             'name' => ['sometimes', 'string', 'max:255'],
             'handle' => ['sometimes', 'nullable', 'string', 'max:255'],
             'status' => ['sometimes', 'string', 'max:255'],
-            'role' => ['sometimes', 'string', 'max:255'],
         ]);
 
         $user->update($data);
@@ -659,6 +758,217 @@ class ClipperController extends Controller
         return response()->json(['message' => 'Pesan terkirim ke admin.', 'ticket' => $message], 201);
     }
 
+    public function joinBrand(Request $request)
+    {
+        $user = $this->currentUser($request);
+        $data = $request->validate([
+            'handle' => ['required', 'string', 'max:255'],
+        ]);
+        $handle = '@'.ltrim(str_replace('\\@', '@', trim($data['handle'])), '@');
+        $brand = Brand::where('handle', $handle)->firstOrFail();
+
+        if ($brand->user_id === $user->id) {
+            return response()->json(['message' => 'Kamu adalah owner brand ini.']);
+        }
+
+        $existing = DB::table('brand_user')
+            ->where('user_id', $user->id)
+            ->where('brand_id', $brand->id)
+            ->first();
+
+        if ($existing?->status === 'active') {
+            return response()->json(['message' => 'Kamu sudah terhubung ke brand ini.', 'brand' => $brand]);
+        }
+
+        $brand->members()->syncWithoutDetaching([
+            $user->id => [
+                'access_type' => $existing?->access_type ?: 'member',
+                'status' => 'pending',
+            ],
+        ]);
+
+        return response()->json([
+            'message' => 'Permintaan join brand dikirim.',
+            'brand' => $brand,
+            'request_status' => 'pending',
+        ], 201);
+    }
+
+    public function onboarding(Request $request)
+    {
+        $user = $this->currentUser($request);
+        $brands = Brand::where('status', 'active')->orderBy('name')->get();
+        $activeBrand = $user->brands()->wherePivot('status', 'active')->first();
+
+        if (! $activeBrand && $brands->count() === 1) {
+            $activeBrand = $brands->first();
+            $activeBrand->members()->syncWithoutDetaching([
+                $user->id => ['access_type' => 'member', 'status' => 'active'],
+            ]);
+        }
+
+        $ownerQuery = User::query()
+            ->whereKeyNot($user->id)
+            ->where('role', 'creator')
+            ->where('status', 'active');
+
+        if ($activeBrand) {
+            $ownerQuery->whereHas('brands', fn ($query) => $query
+                ->whereKey($activeBrand->id)
+                ->where('brand_user.status', 'active'));
+        } else {
+            $ownerQuery->whereRaw('1 = 0');
+        }
+
+        return response()->json([
+            'user' => $this->userPayload($user->refresh()),
+            'brands' => $brands->map(fn (Brand $brand) => [
+                'id' => $brand->id,
+                'name' => $brand->name,
+                'handle' => $brand->handle,
+            ])->values(),
+            'active_brand' => $activeBrand ? [
+                'id' => $activeBrand->id,
+                'name' => $activeBrand->name,
+                'handle' => $activeBrand->handle,
+            ] : null,
+            'owners' => $ownerQuery
+                ->orderBy('name')
+                ->get()
+                ->map(fn (User $owner) => [
+                    'id' => $owner->id,
+                    'name' => $owner->name,
+                    'handle' => $owner->handle,
+                ])
+                ->values(),
+        ]);
+    }
+
+    public function joinOnboardingBrand(Request $request)
+    {
+        $user = $this->currentUser($request);
+        $data = $request->validate([
+            'brand_id' => ['nullable', 'exists:brands,id'],
+        ]);
+        $brand = isset($data['brand_id'])
+            ? Brand::where('status', 'active')->findOrFail($data['brand_id'])
+            : Brand::where('status', 'active')->firstOrFail();
+
+        $brand->members()->syncWithoutDetaching([
+            $user->id => ['access_type' => 'member', 'status' => 'active'],
+        ]);
+
+        return response()->json([
+            'message' => 'Brand terhubung.',
+            'brand' => [
+                'id' => $brand->id,
+                'name' => $brand->name,
+                'handle' => $brand->handle,
+            ],
+        ]);
+    }
+
+    public function completeOnboarding(Request $request)
+    {
+        $user = $this->currentUser($request);
+        $data = $request->validate([
+            'mode' => ['required', Rule::in(['owner', 'member'])],
+            'owner_user_id' => ['required_if:mode,member', 'nullable', 'exists:users,id'],
+        ]);
+        $brandIds = $user->brands()->wherePivot('status', 'active')->pluck('brands.id');
+
+        abort_if($brandIds->isEmpty(), 422, 'Pilih brand dulu sebelum lanjut.');
+
+        if ($data['mode'] === 'owner') {
+            $user->forceFill([
+                'status' => 'active',
+                'onboarding_completed' => true,
+            ])->save();
+
+            return response()->json([
+                'message' => 'Onboarding selesai.',
+                'user' => $this->userPayload($user->refresh()),
+            ]);
+        }
+
+        $owner = User::query()
+            ->whereKey($data['owner_user_id'])
+            ->where('role', 'creator')
+            ->where('status', 'active')
+            ->whereHas('brands', fn ($query) => $query
+                ->whereIn('brands.id', $brandIds)
+                ->where('brand_user.status', 'active'))
+            ->firstOrFail();
+        $account = $this->ensureMainSocialAccount($user);
+
+        DB::transaction(function () use ($user, $owner, $account): void {
+            $owner->socialAccounts()->syncWithoutDetaching([
+                $account->id => ['access_type' => 'member', 'status' => 'active'],
+            ]);
+
+            $user->delete();
+        });
+
+        return response()->json([
+            'message' => 'Akun dipindahkan menjadi social account member.',
+            'logout' => true,
+            'credentials' => [
+                'identifier' => $account->handle,
+                'password' => 'password',
+            ],
+        ]);
+    }
+
+    public function brandRequests(Request $request)
+    {
+        $owner = $this->currentUser($request);
+        $ownedBrandIds = $owner->ownedBrands()->pluck('id');
+
+        return response()->json(DB::table('brand_user')
+            ->join('users', 'users.id', '=', 'brand_user.user_id')
+            ->join('brands', 'brands.id', '=', 'brand_user.brand_id')
+            ->where('brand_user.status', 'pending')
+            ->whereIn('brands.id', $ownedBrandIds)
+            ->orderByDesc('brand_user.updated_at')
+            ->get([
+                'brands.id as brand_id',
+                'brands.name as brand_name',
+                'brands.handle as brand_handle',
+                'users.id as user_id',
+                'users.name as user_name',
+                'users.email as user_email',
+                'users.handle as user_handle',
+                'brand_user.access_type',
+                'brand_user.status',
+                'brand_user.updated_at',
+            ]));
+    }
+
+    public function updateBrandRequest(Request $request, Brand $brand, User $user)
+    {
+        $owner = $this->currentUser($request);
+        $data = $request->validate([
+            'status' => ['required', Rule::in(['active', 'rejected'])],
+        ]);
+
+        abort_unless($brand->user_id === $owner->id, 403, 'Kamu bukan owner brand ini.');
+
+        abort_unless(
+            $brand->members()
+                ->wherePivot('status', 'pending')
+                ->whereKey($user->id)
+                ->exists(),
+            404,
+            'Permintaan join brand tidak ditemukan.',
+        );
+
+        $brand->members()->updateExistingPivot($user->id, [
+            'status' => $data['status'],
+        ]);
+
+        return response()->json(['message' => $data['status'] === 'active' ? 'Permintaan disetujui.' : 'Permintaan ditolak.']);
+    }
+
     private function currentUser(Request $request): User
     {
         $token = $request->bearerToken() ?: $request->header('X-Api-Token');
@@ -679,11 +989,11 @@ class ClipperController extends Controller
     private function validatedSocialAccountId(Request $request, User $user, ?int $socialAccountId): ?int
     {
         if (! $socialAccountId) {
-            return $user->socialAccounts()->value('id');
+            return $user->socialAccounts()->wherePivot('status', 'active')->value('social_accounts.id');
         }
 
         abort_unless(
-            $user->socialAccounts()->whereKey($socialAccountId)->exists(),
+            $user->socialAccounts()->wherePivot('status', 'active')->whereKey($socialAccountId)->exists(),
             422,
             'Akun sosial tidak terhubung ke user ini.',
         );
@@ -698,6 +1008,8 @@ class ClipperController extends Controller
 
     private function userPayload(User $user): array
     {
+        $account = $this->primarySocialAccount($user);
+
         return [
             'id' => $user->id,
             'name' => $user->name,
@@ -705,10 +1017,44 @@ class ClipperController extends Controller
             'handle' => $user->handle,
             'role' => $user->role,
             'status' => $user->status,
-            'bank_name' => $user->bank_name,
-            'bank_account_number' => $user->bank_account_number,
-            'bank_account_name' => $user->bank_account_name,
+            'onboarding_completed' => $user->onboarding_completed,
+            'avatar_url' => $account?->avatar_url,
+            'bank_name' => $account?->bank_name,
+            'bank_account_number' => $account?->bank_account_number,
+            'bank_account_name' => $account?->bank_account_name,
         ];
+    }
+
+    private function primarySocialAccount(User $user): ?SocialAccount
+    {
+        return $user->socialAccounts()
+            ->wherePivot('status', 'active')
+            ->orderByRaw('social_accounts.handle = ? desc', [$user->handle])
+            ->orderBy('social_account_user.id')
+            ->first();
+    }
+
+    private function ensureMainSocialAccount(User $user): SocialAccount
+    {
+        $socialAccount = SocialAccount::firstOrCreate(
+            ['handle' => $user->handle],
+            [
+                'name' => "{$user->name} Main",
+                'email' => $user->email,
+                'platform' => 'tiktok',
+                'status' => 'active',
+                'balance' => 0,
+            ],
+        );
+        $socialAccount->fill([
+            'email' => $socialAccount->email ?: $user->email,
+        ])->save();
+
+        $user->socialAccounts()->syncWithoutDetaching([
+            $socialAccount->id => ['access_type' => 'owner', 'status' => 'active'],
+        ]);
+
+        return $socialAccount;
     }
 
     private function campaignPayload(Campaign $campaign, bool $detail = false, ?User $user = null): array

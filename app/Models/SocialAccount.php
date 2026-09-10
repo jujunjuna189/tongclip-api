@@ -5,11 +5,13 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 
-#[Fillable(['user_id', 'name', 'handle', 'platform', 'status', 'balance'])]
+#[Fillable(['name', 'email', 'handle', 'platform', 'status', 'avatar_url', 'bank_name', 'bank_account_number', 'bank_account_name', 'balance'])]
 class SocialAccount extends Model
 {
-    public function user()
+    public function users()
     {
-        return $this->belongsTo(User::class);
+        return $this->belongsToMany(User::class)
+            ->withPivot(['access_type', 'status'])
+            ->withTimestamps();
     }
 }

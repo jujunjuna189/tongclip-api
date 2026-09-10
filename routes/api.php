@@ -22,6 +22,12 @@ Route::prefix('v1')->group(function (): void {
     Route::get('/courses', [ClipperController::class, 'courses']);
     Route::get('/courses/{course}', [ClipperController::class, 'course']);
     Route::post('/contact-admin', [ClipperController::class, 'contactAdmin']);
+    Route::get('/onboarding', [ClipperController::class, 'onboarding']);
+    Route::post('/onboarding/brand', [ClipperController::class, 'joinOnboardingBrand']);
+    Route::post('/onboarding/complete', [ClipperController::class, 'completeOnboarding']);
+    Route::post('/brands/join', [ClipperController::class, 'joinBrand']);
+    Route::get('/brand-requests', [ClipperController::class, 'brandRequests']);
+    Route::patch('/brand-requests/{brand}/{user}', [ClipperController::class, 'updateBrandRequest']);
 
     Route::get('/admin/campaigns', [ClipperController::class, 'adminCampaigns']);
     Route::post('/admin/campaigns', [ClipperController::class, 'createAdminCampaign']);
