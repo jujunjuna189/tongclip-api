@@ -16,9 +16,12 @@ Route::prefix('v1')->group(function (): void {
     Route::get('/incomes', [ClipperController::class, 'incomes']);
     Route::get('/income-summary', [ClipperController::class, 'incomeSummary']);
     Route::post('/withdrawals', [ClipperController::class, 'requestWithdrawal']);
+    Route::post('/profile', [ClipperController::class, 'updateProfile']);
     Route::patch('/profile', [ClipperController::class, 'updateProfile']);
     Route::get('/leaderboard', [ClipperController::class, 'leaderboard']);
     Route::get('/announcements', [ClipperController::class, 'announcements']);
+    Route::get('/notifications', [ClipperController::class, 'notifications']);
+    Route::post('/notifications/read', [ClipperController::class, 'markNotificationsRead']);
     Route::get('/courses', [ClipperController::class, 'courses']);
     Route::get('/courses/{course}', [ClipperController::class, 'course']);
     Route::post('/contact-admin', [ClipperController::class, 'contactAdmin']);
@@ -45,4 +48,8 @@ Route::prefix('v1')->group(function (): void {
     Route::get('/admin/payouts', [ClipperController::class, 'adminPayouts']);
     Route::patch('/admin/payouts/{payout}', [ClipperController::class, 'updateAdminPayout']);
     Route::delete('/admin/payouts/{payout}', [ClipperController::class, 'deleteAdminPayout']);
+    Route::get('/admin/courses', [ClipperController::class, 'adminCourses']);
+    Route::post('/admin/courses', [ClipperController::class, 'createAdminCourse']);
+    Route::patch('/admin/courses/{course}', [ClipperController::class, 'updateAdminCourse']);
+    Route::delete('/admin/courses/{course}', [ClipperController::class, 'deleteAdminCourse']);
 });

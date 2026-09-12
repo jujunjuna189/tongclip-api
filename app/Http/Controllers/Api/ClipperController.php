@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\AdminMessage;
 use App\Models\Announcement;
+use App\Models\AppNotification;
 use App\Models\Brand;
 use App\Models\Campaign;
 use App\Models\CampaignSubmission;
@@ -16,6 +17,7 @@ use App\Models\Withdrawal;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -132,12 +134,16 @@ class ClipperController extends Controller
         }
 
         $validIncome = $incomeQuery->sum('amount');
+        $withdrawnAmount = $user->withdrawals()
+            ->whereIn('status', ['requested', 'approved', 'paid'])
+            ->sum('amount');
+        $withdrawableAmount = max(0, $validIncome - $withdrawnAmount);
         $videoCount = (clone $submissionQuery)->count();
 
         return response()->json([
             'stats' => [
                 ['label' => 'Total Pendapatan', 'value' => $this->rupiah($validIncome)],
-                ['label' => 'Bisa Dicairkan', 'value' => $this->rupiah($validIncome)],
+                ['label' => 'Bisa Dicairkan', 'value' => $this->rupiah($withdrawableAmount)],
                 ['label' => 'Total Video', 'value' => $videoCount.' Video'],
             ],
             'selected_account_id' => $selectedAccountId,
@@ -346,6 +352,17 @@ class ClipperController extends Controller
         $user = $this->currentUser($request);
         $data = $request->validate(['amount' => ['required', 'integer', 'min:50000']]);
         $account = $this->primarySocialAccount($user);
+        $validIncome = $user->incomes()->where('status', 'valid')->sum('amount');
+        $withdrawnAmount = $user->withdrawals()
+            ->whereIn('status', ['requested', 'approved', 'paid'])
+            ->sum('amount');
+        $withdrawableAmount = max(0, $validIncome - $withdrawnAmount);
+
+        if ($data['amount'] > $withdrawableAmount) {
+            throw ValidationException::withMessages([
+                'amount' => 'Nominal withdraw melebihi saldo yang bisa dicairkan.',
+            ]);
+        }
 
         $withdrawal = Withdrawal::create([
             'user_id' => $user->id,
@@ -361,25 +378,51 @@ class ClipperController extends Controller
 
     public function updateProfile(Request $request)
     {
+        $user = $this->currentUser($request);
         $data = $request->validate([
             'name' => ['sometimes', 'string', 'max:255'],
             'handle' => ['sometimes', 'nullable', 'string', 'max:255'],
             'avatar_url' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'avatar' => ['sometimes', 'image', 'max:2048'],
             'bank_name' => ['sometimes', 'nullable', 'string', 'max:255'],
             'bank_account_number' => ['sometimes', 'nullable', 'string', 'max:255'],
             'bank_account_name' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
-        $user = $this->currentUser($request);
+        if (array_key_exists('handle', $data) && $data['handle']) {
+            $data['handle'] = '@'.ltrim($data['handle'], '@');
+
+            if (
+                User::where('handle', $data['handle'])->whereKeyNot($user->id)->exists()
+                || SocialAccount::where('handle', $data['handle'])
+                    ->whereDoesntHave('users', fn ($query) => $query->whereKey($user->id))
+                    ->exists()
+            ) {
+                throw ValidationException::withMessages(['handle' => 'Handle sudah digunakan.']);
+            }
+        }
+
+        $primaryAccount = $this->primarySocialAccount($user);
+        $oldHandle = $user->handle;
         $accountData = collect($data)->only(['avatar_url', 'bank_name', 'bank_account_number', 'bank_account_name'])->all();
-        $userData = collect($data)->except(['avatar_url', 'bank_name', 'bank_account_number', 'bank_account_name'])->all();
+        $userData = collect($data)->except(['avatar_url', 'avatar', 'bank_name', 'bank_account_number', 'bank_account_name'])->all();
+
+        if ($request->hasFile('avatar')) {
+            $path = $request->file('avatar')->store('avatars', 'public');
+            $accountData['avatar_url'] = Storage::disk('public')->url($path);
+        }
 
         if ($userData) {
             $user->update($userData);
         }
 
-        if ($accountData) {
-            $this->primarySocialAccount($user)?->update($accountData);
+        if ($primaryAccount && ($accountData || ($data['handle'] ?? null))) {
+            if (($data['handle'] ?? null) && $primaryAccount->handle === $oldHandle) {
+                $accountData['handle'] = $data['handle'];
+                $accountData['email'] = $user->email;
+            }
+
+            $primaryAccount->update($accountData);
         }
 
         return response()->json($this->userPayload($user->refresh()));
@@ -419,6 +462,38 @@ class ClipperController extends Controller
         return response()->json(Course::latest()->get());
     }
 
+    public function adminCourses()
+    {
+        return response()->json(Course::latest()->get());
+    }
+
+    public function createAdminCourse(Request $request)
+    {
+        $data = $this->validateCourse($request);
+
+        return response()->json([
+            'message' => 'Course dibuat.',
+            'course' => Course::create($data),
+        ], 201);
+    }
+
+    public function updateAdminCourse(Request $request, Course $course)
+    {
+        $course->update($this->validateCourse($request, true));
+
+        return response()->json([
+            'message' => 'Course diperbarui.',
+            'course' => $course->refresh(),
+        ]);
+    }
+
+    public function deleteAdminCourse(Course $course)
+    {
+        $course->delete();
+
+        return response()->json(['message' => 'Course dihapus.']);
+    }
+
     public function adminCampaigns()
     {
         return response()->json(Campaign::query()
@@ -438,14 +513,23 @@ class ClipperController extends Controller
             'title' => ['required', 'string', 'max:255'],
             'brand' => ['required', 'string', 'max:255'],
             'image_url' => ['nullable', 'string', 'max:2048'],
+            'hero_image' => ['nullable', 'image', 'max:4096'],
             'rate_per_view' => ['required', 'integer', 'min:0'],
             'category' => ['required', 'string', 'max:255'],
             'budget_percent' => ['required', 'integer', 'min:0', 'max:100'],
             'views_target' => ['required', 'integer', 'min:0'],
             'type' => ['required', 'string', 'max:255'],
             'status' => ['required', 'string', 'max:255'],
+            'exclusive' => ['nullable', 'boolean'],
             'deadline_at' => ['nullable', 'date'],
             'brief' => ['nullable', 'string'],
+            'rules' => ['nullable', 'array'],
+            'rules.*' => ['string', 'max:1000'],
+            'assets' => ['nullable', 'array'],
+            'assets.*.title' => ['nullable', 'string', 'max:255'],
+            'assets.*.url' => ['nullable', 'string', 'max:2048'],
+            'platforms' => ['nullable', 'array'],
+            'platforms.*' => ['string', 'max:255'],
         ]);
 
         $baseSlug = Str::slug($data['title']);
@@ -456,12 +540,20 @@ class ClipperController extends Controller
             $slug = $baseSlug.'-'.$suffix++;
         }
 
+        if ($request->hasFile('hero_image')) {
+            $data['image_url'] = Storage::disk('public')->url($request->file('hero_image')->store('campaigns', 'public'));
+        }
+
+        unset($data['hero_image']);
+
         $campaign = Campaign::create([
-            'slug' => $slug,
-            'exclusive' => false,
-            'assets' => [],
-            'platforms' => ['TikTok', 'IG', 'YT'],
             ...$data,
+            'slug' => $slug,
+            'image_url' => $data['image_url'] ?? null,
+            'exclusive' => $data['exclusive'] ?? false,
+            'rules' => $data['rules'] ?? [],
+            'assets' => $data['assets'] ?? [],
+            'platforms' => $data['platforms'] ?? ['TikTok', 'IG', 'YT'],
         ]);
 
         return response()->json([
@@ -489,7 +581,25 @@ class ClipperController extends Controller
             'budget_percent' => ['sometimes', 'integer', 'min:0', 'max:100'],
             'views_target' => ['sometimes', 'integer', 'min:0'],
             'status' => ['sometimes', 'string', 'max:255'],
+            'exclusive' => ['sometimes', 'boolean'],
+            'deadline_at' => ['sometimes', 'nullable', 'date'],
+            'image_url' => ['sometimes', 'nullable', 'string', 'max:2048'],
+            'hero_image' => ['sometimes', 'nullable', 'image', 'max:4096'],
+            'brief' => ['sometimes', 'nullable', 'string'],
+            'rules' => ['sometimes', 'nullable', 'array'],
+            'rules.*' => ['string', 'max:1000'],
+            'assets' => ['sometimes', 'nullable', 'array'],
+            'assets.*.title' => ['nullable', 'string', 'max:255'],
+            'assets.*.url' => ['nullable', 'string', 'max:2048'],
+            'platforms' => ['sometimes', 'nullable', 'array'],
+            'platforms.*' => ['string', 'max:255'],
         ]);
+
+        if ($request->hasFile('hero_image')) {
+            $data['image_url'] = Storage::disk('public')->url($request->file('hero_image')->store('campaigns', 'public'));
+        }
+
+        unset($data['hero_image']);
 
         $campaign->update($data);
 
@@ -521,7 +631,9 @@ class ClipperController extends Controller
                 'status' => Str::headline($submission->status),
                 'link' => $submission->video_url,
                 'views' => number_format($submission->views, 0, ',', '.'),
+                'views_value' => $submission->views,
                 'estimated_payout' => $this->rupiah($submission->estimated_payout),
+                'estimated_payout_value' => $submission->estimated_payout,
             ]));
     }
 
@@ -758,6 +870,39 @@ class ClipperController extends Controller
         return response()->json(['message' => 'Pesan terkirim ke admin.', 'ticket' => $message], 201);
     }
 
+    public function notifications(Request $request)
+    {
+        $user = $this->currentUser($request);
+        $notifications = $user->notifications()
+            ->latest()
+            ->take(20)
+            ->get()
+            ->map(fn (AppNotification $notification) => [
+                'id' => $notification->id,
+                'type' => $notification->type,
+                'title' => $notification->title,
+                'body' => $notification->body,
+                'data' => $notification->data,
+                'read_at' => $notification->read_at?->toISOString(),
+                'created_at' => $notification->created_at?->diffForHumans(),
+            ]);
+
+        return response()->json([
+            'items' => $notifications,
+            'unread_count' => $user->notifications()->whereNull('read_at')->count(),
+        ]);
+    }
+
+    public function markNotificationsRead(Request $request)
+    {
+        $this->currentUser($request)
+            ->notifications()
+            ->whereNull('read_at')
+            ->update(['read_at' => now()]);
+
+        return response()->json(['message' => 'Notifikasi ditandai sudah dibaca.']);
+    }
+
     public function joinBrand(Request $request)
     {
         $user = $this->currentUser($request);
@@ -780,12 +925,27 @@ class ClipperController extends Controller
             return response()->json(['message' => 'Kamu sudah terhubung ke brand ini.', 'brand' => $brand]);
         }
 
+        if ($existing?->status === 'pending') {
+            return response()->json([
+                'message' => 'Permintaan join brand sudah dikirim.',
+                'brand' => $brand,
+                'request_status' => 'pending',
+            ]);
+        }
+
         $brand->members()->syncWithoutDetaching([
             $user->id => [
                 'access_type' => $existing?->access_type ?: 'member',
                 'status' => 'pending',
             ],
         ]);
+        $this->notifyUser(
+            $brand->owner,
+            'brand_join_request',
+            'Request join brand baru',
+            "{$user->name} ingin bergabung ke {$brand->name}.",
+            ['brand_id' => $brand->id, 'user_id' => $user->id],
+        );
 
         return response()->json([
             'message' => 'Permintaan join brand dikirim.',
@@ -908,6 +1068,13 @@ class ClipperController extends Controller
 
             $user->delete();
         });
+        $this->notifyUser(
+            $owner,
+            'creator_member_joined',
+            'Akun member baru terhubung',
+            "{$account->name} ({$account->handle}) masuk ke akun kamu.",
+            ['social_account_id' => $account->id],
+        );
 
         return response()->json([
             'message' => 'Akun dipindahkan menjadi social account member.',
@@ -965,6 +1132,15 @@ class ClipperController extends Controller
         $brand->members()->updateExistingPivot($user->id, [
             'status' => $data['status'],
         ]);
+        $this->notifyUser(
+            $user,
+            'brand_join_'.$data['status'],
+            $data['status'] === 'active' ? 'Request join disetujui' : 'Request join ditolak',
+            $data['status'] === 'active'
+                ? "Kamu sudah terhubung ke {$brand->name}."
+                : "Request join kamu ke {$brand->name} ditolak.",
+            ['brand_id' => $brand->id],
+        );
 
         return response()->json(['message' => $data['status'] === 'active' ? 'Permintaan disetujui.' : 'Permintaan ditolak.']);
     }
@@ -1057,6 +1233,21 @@ class ClipperController extends Controller
         return $socialAccount;
     }
 
+    private function notifyUser(?User $user, string $type, string $title, ?string $body = null, array $data = []): void
+    {
+        if (! $user) {
+            return;
+        }
+
+        AppNotification::create([
+            'user_id' => $user->id,
+            'type' => $type,
+            'title' => $title,
+            'body' => $body,
+            'data' => $data,
+        ]);
+    }
+
     private function campaignPayload(Campaign $campaign, bool $detail = false, ?User $user = null): array
     {
         $submission = $user
@@ -1102,12 +1293,33 @@ class ClipperController extends Controller
         if ($detail) {
             $payload += [
                 'brief' => $campaign->brief,
+                'rules' => $campaign->rules ?? [],
                 'assets' => $campaign->assets ?? [],
                 'platforms' => $campaign->platforms ?? [],
             ];
         }
 
         return $payload;
+    }
+
+    private function validateCourse(Request $request, bool $partial = false): array
+    {
+        $required = $partial ? 'sometimes' : 'required';
+
+        return $request->validate([
+            'title' => [$required, 'string', 'max:255'],
+            'description' => [$required, 'string'],
+            'image_url' => ['nullable', 'string', 'max:2048'],
+            'duration' => ['nullable', 'string', 'max:255'],
+            'level' => ['nullable', 'string', 'max:255'],
+            'url' => ['nullable', 'string', 'max:2048'],
+            'lessons' => ['nullable', 'array'],
+            'lessons.*.title' => ['nullable', 'string', 'max:255'],
+            'lessons.*.duration' => ['nullable', 'string', 'max:255'],
+            'lessons.*.video_url' => ['nullable', 'string', 'max:2048'],
+            'resources' => ['nullable', 'array'],
+            'resources.*' => ['string', 'max:2048'],
+        ]);
     }
 
     private function rupiah(int|float $amount): string

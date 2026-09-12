@@ -67,6 +67,7 @@ return new class extends Migration
             $table->string('type')->default('CLIPPING');
             $table->boolean('exclusive')->default(false);
             $table->text('brief')->nullable();
+            $table->json('rules')->nullable();
             $table->json('assets')->nullable();
             $table->json('platforms')->nullable();
             $table->string('status')->default('active');
@@ -126,6 +127,19 @@ return new class extends Migration
             $table->string('duration')->nullable();
             $table->string('level')->default('Pemula');
             $table->string('url')->nullable();
+            $table->json('lessons')->nullable();
+            $table->json('resources')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('notifications', function (Blueprint $table): void {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->string('type');
+            $table->string('title');
+            $table->text('body')->nullable();
+            $table->json('data')->nullable();
+            $table->timestamp('read_at')->nullable();
             $table->timestamps();
         });
 
@@ -142,6 +156,7 @@ return new class extends Migration
     public function down(): void
     {
         Schema::dropIfExists('admin_messages');
+        Schema::dropIfExists('notifications');
         Schema::dropIfExists('courses');
         Schema::dropIfExists('announcements');
         Schema::dropIfExists('withdrawals');

@@ -5,5 +5,14 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Model;
 
-#[Fillable(['title', 'description', 'image_url', 'duration', 'level', 'url'])]
-class Course extends Model {}
+#[Fillable(['title', 'description', 'image_url', 'duration', 'level', 'url', 'lessons', 'resources'])]
+class Course extends Model
+{
+    protected function casts(): array
+    {
+        return [
+            'lessons' => 'array',
+            'resources' => 'array',
+        ];
+    }
+}

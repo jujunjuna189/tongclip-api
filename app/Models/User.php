@@ -60,6 +60,16 @@ class User extends Authenticatable
         return $this->hasMany(Income::class);
     }
 
+    public function withdrawals()
+    {
+        return $this->hasMany(Withdrawal::class);
+    }
+
+    public function notifications()
+    {
+        return $this->hasMany(AppNotification::class);
+    }
+
     /**
      * Get the attributes that should be cast.
      *

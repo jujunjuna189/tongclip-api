@@ -18,6 +18,7 @@ use Illuminate\Database\Eloquent\Model;
     'type',
     'exclusive',
     'brief',
+    'rules',
     'assets',
     'platforms',
     'status',
@@ -29,6 +30,7 @@ class Campaign extends Model
         return [
             'exclusive' => 'boolean',
             'deadline_at' => 'date',
+            'rules' => 'array',
             'assets' => 'array',
             'platforms' => 'array',
         ];
