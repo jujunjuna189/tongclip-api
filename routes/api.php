@@ -46,6 +46,7 @@ Route::prefix('v1')->group(function (): void {
     Route::post('/admin/creators', [ClipperController::class, 'createAdminCreator']);
     Route::post('/admin/creators/invite', [ClipperController::class, 'inviteAdminCreator']);
     Route::patch('/admin/creators/{user}', [ClipperController::class, 'updateAdminCreator']);
+    Route::post('/admin/creators/{user}', [ClipperController::class, 'updateAdminCreator']);
     Route::delete('/admin/creators/{user}', [ClipperController::class, 'deleteAdminCreator']);
     Route::get('/admin/payouts', [ClipperController::class, 'adminPayouts']);
     Route::patch('/admin/payouts/{payout}', [ClipperController::class, 'updateAdminPayout']);

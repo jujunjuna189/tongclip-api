@@ -40,6 +40,7 @@ class ClipperController extends Controller
         }
 
         $loginViaSocialAccount = false;
+        $socialAccount = null;
         $user = User::where('email', $identifier)
             ->orWhereIn('handle', [$identifier, $handleIdentifier, $prefixedHandleIdentifier])
             ->first();
@@ -66,7 +67,13 @@ class ClipperController extends Controller
 
         $user->forceFill(['api_token' => Str::random(60)])->save();
 
-        return response()->json(['token' => $user->api_token, 'user' => $this->userPayload($user)]);
+        return response()->json([
+            'token' => $user->api_token,
+            'user' => [
+                ...$this->userPayload($user),
+                'login_social_account_id' => $loginViaSocialAccount ? $socialAccount?->id : null,
+            ],
+        ]);
     }
 
     public function register(Request $request)
@@ -189,6 +196,7 @@ class ClipperController extends Controller
                 'bank_account_number' => $primaryAccount?->bank_account_number,
                 'bank_account_name' => $primaryAccount?->bank_account_name,
                 'type' => 'user',
+                'access_type' => 'owner',
             ]])->merge($accounts->map(fn ($account) => [
                 'id' => $account->id,
                 'name' => $account->name,
@@ -202,6 +210,7 @@ class ClipperController extends Controller
                 'bank_account_number' => $account->bank_account_number,
                 'bank_account_name' => $account->bank_account_name,
                 'type' => 'social_account',
+                'access_type' => $account->pivot?->access_type ?: 'member',
             ]))->values(),
             'submissions' => (clone $submissionQuery)
                 ->with(['campaign', 'socialAccount'])
@@ -414,18 +423,25 @@ class ClipperController extends Controller
             'handle' => ['required', 'string', 'max:255'],
             'platform' => ['required', 'string', 'max:255'],
             'avatar_url' => ['nullable', 'string', 'max:2048'],
+            'avatar' => ['nullable', 'image', 'max:2048'],
             'bank_name' => ['nullable', 'string', 'max:255'],
             'bank_account_number' => ['nullable', 'string', 'max:255'],
             'bank_account_name' => ['nullable', 'string', 'max:255'],
         ]);
 
         $data['handle'] = '@'.ltrim($data['handle'], '@');
+        unset($data['avatar']);
 
         if (
             User::where('handle', $data['handle'])->exists()
             || SocialAccount::where('handle', $data['handle'])->exists()
         ) {
             throw ValidationException::withMessages(['handle' => 'Handle sudah digunakan.']);
+        }
+
+        if ($request->hasFile('avatar')) {
+            $path = $request->file('avatar')->store('avatars', 'public');
+            $data['avatar_url'] = $this->publicStoragePath($path);
         }
 
         $account = SocialAccount::create([
@@ -435,7 +451,7 @@ class ClipperController extends Controller
         ]);
 
         $user->socialAccounts()->attach($account->id, [
-            'access_type' => 'owner',
+            'access_type' => 'member',
             'status' => 'active',
         ]);
 
@@ -738,20 +754,29 @@ class ClipperController extends Controller
             ->withCount('socialAccounts')
             ->withCount(['submissions as submissions_count' => fn ($query) => $query->whereNotNull('video_url')])
             ->withSum(['incomes as income_total' => fn ($query) => $query->where('status', 'valid')], 'amount')
+            ->with(['socialAccounts' => fn ($query) => $query->orderBy('social_account_user.id')])
             ->latest()
             ->get()
-            ->map(fn (User $user) => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-                'handle' => $user->handle,
-                'role' => $user->role,
-                'status' => Str::headline($user->status),
-                'accounts_count' => $user->social_accounts_count,
-                'submissions_count' => $user->submissions_count,
-                'income' => $this->rupiah($user->income_total ?? 0),
-                'income_value' => $user->income_total ?? 0,
-            ]));
+            ->map(function (User $user) {
+                $primaryAccount = $user->socialAccounts->first();
+
+                return [
+                    'id' => $user->id,
+                    'name' => $user->name,
+                    'email' => $user->email,
+                    'handle' => $user->handle,
+                    'role' => $user->role,
+                    'status' => Str::headline($user->status),
+                    'accounts_count' => $user->social_accounts_count,
+                    'submissions_count' => $user->submissions_count,
+                    'income' => $this->rupiah($user->income_total ?? 0),
+                    'income_value' => $user->income_total ?? 0,
+                    'avatar_url' => $this->publicAssetUrl($primaryAccount?->avatar_url),
+                    'bank_name' => $primaryAccount?->bank_name,
+                    'bank_account_number' => $primaryAccount?->bank_account_number,
+                    'bank_account_name' => $primaryAccount?->bank_account_name,
+                ];
+            }));
     }
 
     public function createAdminCreator(Request $request)
@@ -835,11 +860,49 @@ class ClipperController extends Controller
     {
         $data = $request->validate([
             'name' => ['sometimes', 'string', 'max:255'],
+            'email' => ['sometimes', 'email', Rule::unique('users', 'email')->ignore($user->id), Rule::unique('social_accounts', 'email')],
             'handle' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'avatar' => ['sometimes', 'nullable', 'image', 'max:2048'],
+            'password' => ['sometimes', 'nullable', 'string', 'min:8'],
             'status' => ['sometimes', 'string', 'max:255'],
+            'bank_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'bank_account_number' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'bank_account_name' => ['sometimes', 'nullable', 'string', 'max:255'],
         ]);
 
-        $user->update($data);
+        if (array_key_exists('handle', $data) && $data['handle']) {
+            $data['handle'] = '@'.ltrim($data['handle'], '@');
+
+            if (
+                User::where('handle', $data['handle'])->whereKeyNot($user->id)->exists()
+                || SocialAccount::where('handle', $data['handle'])
+                    ->whereDoesntHave('users', fn ($query) => $query->whereKey($user->id))
+                    ->exists()
+            ) {
+                throw ValidationException::withMessages(['handle' => 'Handle sudah digunakan.']);
+            }
+        }
+
+        if (!empty($data['password'])) {
+            $data['password'] = Hash::make($data['password']);
+        } else {
+            unset($data['password']);
+        }
+
+        $accountData = collect($data)->only(['bank_name', 'bank_account_number', 'bank_account_name'])->all();
+        $userData = collect($data)->except(['avatar', 'bank_name', 'bank_account_number', 'bank_account_name'])->all();
+
+        if ($request->hasFile('avatar')) {
+            $path = $request->file('avatar')->store('avatars', 'public');
+            $accountData['avatar_url'] = $this->publicStoragePath($path);
+        }
+
+        $user->update($userData);
+
+        $primaryAccount = $this->primarySocialAccount($user);
+        if ($primaryAccount && $accountData) {
+            $primaryAccount->update($accountData);
+        }
 
         return response()->json(['message' => 'Creator diperbarui.', 'creator' => $this->userPayload($user->refresh())]);
     }
@@ -1351,7 +1414,7 @@ class ClipperController extends Controller
         ])->save();
 
         $user->socialAccounts()->syncWithoutDetaching([
-            $socialAccount->id => ['access_type' => 'owner', 'status' => 'active'],
+            $socialAccount->id => ['access_type' => 'member', 'status' => 'active'],
         ]);
 
         return $socialAccount;
