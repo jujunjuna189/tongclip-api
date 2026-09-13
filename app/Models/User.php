@@ -70,6 +70,11 @@ class User extends Authenticatable
         return $this->hasMany(AppNotification::class);
     }
 
+    public function adminMessages()
+    {
+        return $this->hasMany(AdminMessage::class);
+    }
+
     /**
      * Get the attributes that should be cast.
      *

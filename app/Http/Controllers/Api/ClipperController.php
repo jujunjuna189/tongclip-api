@@ -139,12 +139,42 @@ class ClipperController extends Controller
             ->sum('amount');
         $withdrawableAmount = max(0, $validIncome - $withdrawnAmount);
         $videoCount = (clone $submissionQuery)->count();
+        $questStart = now()->startOfDay()->subDays(6);
+        $questEnd = now()->endOfDay();
+        $questDates = (clone $submissionQuery)
+            ->whereBetween('submitted_at', [$questStart, $questEnd])
+            ->get()
+            ->map(fn (CampaignSubmission $submission) => $submission->submitted_at?->toDateString())
+            ->filter()
+            ->unique()
+            ->values();
+        $questDays = collect(range(0, 6))->map(function (int $offset) use ($questStart, $questDates) {
+            $date = $questStart->copy()->addDays($offset);
+
+            return [
+                'day' => $offset + 1,
+                'date' => $date->toDateString(),
+                'label' => $date->translatedFormat('d M'),
+                'completed' => $questDates->contains($date->toDateString()),
+                'is_today' => $date->isToday(),
+            ];
+        });
+        $questCompletedDays = $questDays->where('completed', true)->count();
 
         return response()->json([
             'stats' => [
                 ['label' => 'Total Pendapatan', 'value' => $this->rupiah($validIncome)],
                 ['label' => 'Bisa Dicairkan', 'value' => $this->rupiah($withdrawableAmount)],
                 ['label' => 'Total Video', 'value' => $videoCount.' Video'],
+            ],
+            'daily_quest' => [
+                'reward' => $this->rupiah(15000),
+                'completed_days' => $questCompletedDays,
+                'target_days' => 7,
+                'remaining_days' => max(0, 7 - $questCompletedDays),
+                'today_completed' => $questDays->firstWhere('is_today', true)['completed'] ?? false,
+                'claimed_count' => 1000,
+                'days' => $questDays->values(),
             ],
             'selected_account_id' => $selectedAccountId,
             'accounts' => collect([[
@@ -431,24 +461,26 @@ class ClipperController extends Controller
     public function leaderboard(Request $request)
     {
         $user = $this->currentUser($request);
-        $brandIds = $user->role === 'brand'
-            ? $user->ownedBrands()->pluck('id')
-            : $user->brands()->wherePivot('status', 'active')->pluck('brands.id');
+        $socialAccountIds = $user->socialAccounts()
+            ->wherePivot('status', 'active')
+            ->wherePivot('access_type', 'owner')
+            ->pluck('social_accounts.id');
 
-        return response()->json(User::query()
-            ->where('role', 'creator')
-            ->whereHas('brands', fn ($query) => $query
-                ->where('brand_user.status', 'active')
-                ->whereIn('brands.id', $brandIds))
-            ->withSum(['incomes as income_total' => fn ($query) => $query->where('status', 'valid')], 'amount')
+        return response()->json(SocialAccount::query()
+            ->whereIn('id', $socialAccountIds)
+            ->withSum(['incomes as income_total' => fn ($query) => $query
+                ->where('status', 'valid')
+                ->where('user_id', $user->id)], 'amount')
             ->orderByDesc('income_total')
             ->take(20)
             ->get()
-            ->map(fn ($user) => [
-                'name' => $user->name,
-                'handle' => $user->handle,
-                'income' => $this->rupiah($user->income_total ?? 0),
-                'income_value' => $user->income_total ?? 0,
+            ->map(fn (SocialAccount $account) => [
+                'id' => $account->id,
+                'name' => $account->name,
+                'handle' => $account->handle,
+                'platform' => $account->platform,
+                'income' => $this->rupiah($account->income_total ?? 0),
+                'income_value' => $account->income_total ?? 0,
             ]));
     }
 
@@ -845,16 +877,14 @@ class ClipperController extends Controller
 
     public function course(Course $course)
     {
-        $videoUrl = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
-
         return response()->json([
             ...$course->toArray(),
-            'lessons' => [
-                ['title' => 'Pembukaan', 'duration' => '3 menit', 'video_url' => $videoUrl],
-                ['title' => 'Contoh Praktik', 'duration' => '8 menit', 'video_url' => $videoUrl],
-                ['title' => 'Checklist Upload', 'duration' => '5 menit', 'video_url' => $videoUrl],
-            ],
-            'resources' => ['Template script', 'Checklist approval', 'Caption starter pack'],
+            'lessons' => $course->lessons ?: [[
+                'title' => $course->title,
+                'duration' => $course->duration,
+                'video_url' => $course->url,
+            ]],
+            'resources' => $course->resources ?: [],
         ]);
     }
 
@@ -865,9 +895,40 @@ class ClipperController extends Controller
             'message' => ['required', 'string'],
         ]);
 
-        $message = AdminMessage::create(['user_id' => $this->currentUser($request)?->id, ...$data]);
+        $message = AdminMessage::create(['user_id' => $this->currentUser($request)->id, ...$data, 'status' => 'processing']);
 
         return response()->json(['message' => 'Pesan terkirim ke admin.', 'ticket' => $message], 201);
+    }
+
+    public function contactTickets(Request $request)
+    {
+        return response()->json($this->currentUser($request)
+            ->adminMessages()
+            ->latest()
+            ->get()
+            ->map(fn (AdminMessage $message) => $this->ticketPayload($message)));
+    }
+
+    public function adminTickets()
+    {
+        return response()->json(AdminMessage::with('user')
+            ->latest()
+            ->get()
+            ->map(fn (AdminMessage $message) => $this->ticketPayload($message, true)));
+    }
+
+    public function updateAdminTicket(Request $request, AdminMessage $message)
+    {
+        $data = $request->validate([
+            'status' => ['required', Rule::in(['processing', 'resolved'])],
+        ]);
+
+        $message->update($data);
+
+        return response()->json([
+            'message' => 'Status tiket diperbarui.',
+            'ticket' => $this->ticketPayload($message->refresh(), true),
+        ]);
     }
 
     public function notifications(Request $request)
@@ -1198,6 +1259,21 @@ class ClipperController extends Controller
             'bank_name' => $account?->bank_name,
             'bank_account_number' => $account?->bank_account_number,
             'bank_account_name' => $account?->bank_account_name,
+        ];
+    }
+
+    private function ticketPayload(AdminMessage $message, bool $includeUser = false): array
+    {
+        return [
+            'id' => $message->id,
+            'subject' => $message->subject,
+            'message' => $message->message,
+            'status' => $message->status === 'resolved' ? 'resolved' : 'processing',
+            'status_label' => $message->status === 'resolved' ? 'Terselesaikan' : 'Sedang Diproses',
+            'created_at' => $message->created_at?->translatedFormat('d M Y H:i'),
+            'creator' => $includeUser ? $message->user?->name : null,
+            'creator_handle' => $includeUser ? $message->user?->handle : null,
+            'creator_email' => $includeUser ? $message->user?->email : null,
         ];
     }
 

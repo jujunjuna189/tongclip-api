@@ -63,6 +63,7 @@ return new class extends Migration
             $table->unsignedInteger('rate_per_view');
             $table->string('category');
             $table->unsignedTinyInteger('budget_percent')->default(0);
+            $table->date('deadline_at')->nullable();
             $table->unsignedInteger('views_target')->default(0);
             $table->string('type')->default('CLIPPING');
             $table->boolean('exclusive')->default(false);

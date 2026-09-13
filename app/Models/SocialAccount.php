@@ -14,4 +14,9 @@ class SocialAccount extends Model
             ->withPivot(['access_type', 'status'])
             ->withTimestamps();
     }
+
+    public function incomes()
+    {
+        return $this->hasMany(Income::class);
+    }
 }

@@ -24,6 +24,7 @@ Route::prefix('v1')->group(function (): void {
     Route::post('/notifications/read', [ClipperController::class, 'markNotificationsRead']);
     Route::get('/courses', [ClipperController::class, 'courses']);
     Route::get('/courses/{course}', [ClipperController::class, 'course']);
+    Route::get('/contact-admin', [ClipperController::class, 'contactTickets']);
     Route::post('/contact-admin', [ClipperController::class, 'contactAdmin']);
     Route::get('/onboarding', [ClipperController::class, 'onboarding']);
     Route::post('/onboarding/brand', [ClipperController::class, 'joinOnboardingBrand']);
@@ -48,6 +49,8 @@ Route::prefix('v1')->group(function (): void {
     Route::get('/admin/payouts', [ClipperController::class, 'adminPayouts']);
     Route::patch('/admin/payouts/{payout}', [ClipperController::class, 'updateAdminPayout']);
     Route::delete('/admin/payouts/{payout}', [ClipperController::class, 'deleteAdminPayout']);
+    Route::get('/admin/tickets', [ClipperController::class, 'adminTickets']);
+    Route::patch('/admin/tickets/{message}', [ClipperController::class, 'updateAdminTicket']);
     Route::get('/admin/courses', [ClipperController::class, 'adminCourses']);
     Route::post('/admin/courses', [ClipperController::class, 'createAdminCourse']);
     Route::patch('/admin/courses/{course}', [ClipperController::class, 'updateAdminCourse']);

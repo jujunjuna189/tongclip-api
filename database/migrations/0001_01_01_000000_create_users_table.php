@@ -15,9 +15,14 @@ return new class extends Migration
             $table->id();
             $table->string('name');
             $table->string('email')->unique();
+            $table->string('handle')->nullable()->unique();
+            $table->string('role')->default('creator');
+            $table->string('status')->default('review');
+            $table->boolean('onboarding_completed')->default(false);
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');
             $table->rememberToken();
+            $table->string('api_token', 80)->nullable()->unique();
             $table->timestamps();
         });
 
