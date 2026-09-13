@@ -15,6 +15,7 @@ Route::prefix('v1')->group(function (): void {
     Route::post('/campaigns/{slug}/submit', [ClipperController::class, 'submitCampaign']);
     Route::get('/incomes', [ClipperController::class, 'incomes']);
     Route::get('/income-summary', [ClipperController::class, 'incomeSummary']);
+    Route::get('/withdrawals', [ClipperController::class, 'withdrawals']);
     Route::post('/withdrawals', [ClipperController::class, 'requestWithdrawal']);
     Route::post('/social-accounts', [ClipperController::class, 'createSocialAccount']);
     Route::post('/profile', [ClipperController::class, 'updateProfile']);
@@ -23,6 +24,7 @@ Route::prefix('v1')->group(function (): void {
     Route::get('/announcements', [ClipperController::class, 'announcements']);
     Route::get('/notifications', [ClipperController::class, 'notifications']);
     Route::post('/notifications/read', [ClipperController::class, 'markNotificationsRead']);
+    Route::post('/notifications/{notification}/read', [ClipperController::class, 'markNotificationRead']);
     Route::get('/courses', [ClipperController::class, 'courses']);
     Route::get('/courses/{course}', [ClipperController::class, 'course']);
     Route::get('/contact-admin', [ClipperController::class, 'contactTickets']);
@@ -45,6 +47,7 @@ Route::prefix('v1')->group(function (): void {
     Route::get('/admin/creators', [ClipperController::class, 'adminCreators']);
     Route::post('/admin/creators', [ClipperController::class, 'createAdminCreator']);
     Route::post('/admin/creators/invite', [ClipperController::class, 'inviteAdminCreator']);
+    Route::get('/admin/creators/{user}/history', [ClipperController::class, 'adminCreatorHistory']);
     Route::patch('/admin/creators/{user}', [ClipperController::class, 'updateAdminCreator']);
     Route::post('/admin/creators/{user}', [ClipperController::class, 'updateAdminCreator']);
     Route::delete('/admin/creators/{user}', [ClipperController::class, 'deleteAdminCreator']);

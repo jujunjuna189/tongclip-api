@@ -311,6 +311,19 @@ class ClipperController extends Controller
             'status' => 'review',
             'submitted_at' => now(),
         ]);
+        $account = $accountId ? SocialAccount::find($accountId) : null;
+
+        $this->notifyAdmins(
+            'submission_review',
+            'Submission baru masuk',
+            "{$user->name} mengirim video untuk {$campaign->title}.",
+            [
+                'submission_id' => $submission->id,
+                'campaign_id' => $campaign->id,
+                'user_id' => $user->id,
+                'social_account_id' => $account?->id,
+            ],
+        );
 
         return response()->json([
             'message' => 'Link video masuk peninjauan.',
@@ -385,14 +398,67 @@ class ClipperController extends Controller
         ]);
     }
 
+    public function withdrawals(Request $request)
+    {
+        $user = $this->currentUser($request);
+        $accountId = $this->validatedSocialAccountId($request, $user, $request->query('social_account_id'));
+        $account = $accountId ? SocialAccount::find($accountId) : null;
+
+        return response()->json($user->withdrawals()
+            ->when($accountId, function ($query) use ($accountId, $account): void {
+                $query->where(function ($builder) use ($accountId, $account): void {
+                    $builder->where('social_account_id', $accountId);
+
+                    if ($account) {
+                        $builder->orWhere(function ($legacyQuery) use ($account): void {
+                            $legacyQuery
+                                ->whereNull('social_account_id')
+                                ->where('bank_name', $account->bank_name)
+                                ->where('bank_account_number', $account->bank_account_number)
+                                ->where('bank_account_name', $account->bank_account_name);
+                        });
+                    }
+                });
+            })
+            ->latest('requested_at')
+            ->get()
+            ->map(fn (Withdrawal $withdrawal) => [
+                'id' => $withdrawal->id,
+                'social_account_id' => $withdrawal->social_account_id,
+                'date' => $withdrawal->requested_at?->translatedFormat('d M Y H:i'),
+                'amount' => $this->rupiah($withdrawal->amount),
+                'amount_value' => $withdrawal->amount,
+                'bank_name' => $withdrawal->bank_name,
+                'bank_account_number' => $withdrawal->bank_account_number,
+                'bank_account_name' => $withdrawal->bank_account_name,
+                'status' => Str::headline($withdrawal->status),
+            ]));
+    }
+
     public function requestWithdrawal(Request $request)
     {
         $user = $this->currentUser($request);
-        $data = $request->validate(['amount' => ['required', 'integer', 'min:50000']]);
-        $account = $this->primarySocialAccount($user);
-        $validIncome = $user->incomes()->where('status', 'valid')->sum('amount');
+        $data = $request->validate([
+            'amount' => ['required', 'integer', 'min:1'],
+            'social_account_id' => ['nullable', 'exists:social_accounts,id'],
+        ]);
+
+        // Hanya bisa diajukan tanggal 15 atau 16
+        $today = now()->day;
+        if (!in_array($today, [15, 16])) {
+            throw ValidationException::withMessages([
+                'amount' => 'Pencairan hanya bisa diajukan pada tanggal 15 atau 16 setiap bulan.',
+            ]);
+        }
+        $accountId = $this->validatedSocialAccountId($request, $user, $data['social_account_id'] ?? null);
+        $account = $accountId ? SocialAccount::find($accountId) : $this->primarySocialAccount($user);
+        $validIncome = $user->incomes()
+            ->where('status', 'valid')
+            ->when($accountId, fn ($query) => $query->where('social_account_id', $accountId))
+            ->sum('amount');
         $withdrawnAmount = $user->withdrawals()
             ->whereIn('status', ['requested', 'approved', 'paid'])
+            ->when($accountId, fn ($query) => $query->where('social_account_id', $accountId))
             ->sum('amount');
         $withdrawableAmount = max(0, $validIncome - $withdrawnAmount);
 
@@ -404,12 +470,23 @@ class ClipperController extends Controller
 
         $withdrawal = Withdrawal::create([
             'user_id' => $user->id,
+            'social_account_id' => $account?->id,
             'amount' => $data['amount'],
             'bank_name' => $account?->bank_name ?: 'BCA',
             'bank_account_number' => $account?->bank_account_number ?: '1234567890',
             'bank_account_name' => $account?->bank_account_name ?: $user->name,
             'requested_at' => now(),
         ]);
+        $this->notifyAdmins(
+            'withdrawal_request',
+            'Pengajuan pencairan baru',
+            "{$user->name} mengajukan pencairan {$this->rupiah($withdrawal->amount)}.",
+            [
+                'withdrawal_id' => $withdrawal->id,
+                'user_id' => $user->id,
+                'social_account_id' => $account?->id,
+            ],
+        );
 
         return response()->json(['message' => 'Permintaan withdraw dibuat.', 'withdrawal' => $withdrawal], 201);
     }
@@ -472,6 +549,7 @@ class ClipperController extends Controller
             'bank_name' => ['sometimes', 'nullable', 'string', 'max:255'],
             'bank_account_number' => ['sometimes', 'nullable', 'string', 'max:255'],
             'bank_account_name' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'social_account_id' => ['sometimes', 'nullable', 'exists:social_accounts,id'],
         ]);
 
         if (array_key_exists('handle', $data) && $data['handle']) {
@@ -487,10 +565,11 @@ class ClipperController extends Controller
             }
         }
 
-        $primaryAccount = $this->primarySocialAccount($user);
+        $selectedAccountId = $this->validatedSocialAccountId($request, $user, $data['social_account_id'] ?? null);
+        $primaryAccount = $selectedAccountId ? SocialAccount::find($selectedAccountId) : $this->primarySocialAccount($user);
         $oldHandle = $user->handle;
         $accountData = collect($data)->only(['avatar_url', 'bank_name', 'bank_account_number', 'bank_account_name'])->all();
-        $userData = collect($data)->except(['avatar_url', 'avatar', 'bank_name', 'bank_account_number', 'bank_account_name'])->all();
+        $userData = collect($data)->except(['avatar_url', 'avatar', 'bank_name', 'bank_account_number', 'bank_account_name', 'social_account_id'])->all();
 
         if ($request->hasFile('avatar')) {
             $path = $request->file('avatar')->store('avatars', 'public');
@@ -518,16 +597,12 @@ class ClipperController extends Controller
         $user = $this->currentUser($request);
         $socialAccountIds = $user->socialAccounts()
             ->wherePivot('status', 'active')
-            ->wherePivot('access_type', 'owner')
             ->pluck('social_accounts.id');
 
         return response()->json(SocialAccount::query()
             ->whereIn('id', $socialAccountIds)
-            ->withSum(['incomes as income_total' => fn ($query) => $query
-                ->where('status', 'valid')
-                ->where('user_id', $user->id)], 'amount')
+            ->withSum(['incomes as income_total' => fn ($query) => $query->where('status', 'valid')], 'amount')
             ->orderByDesc('income_total')
-            ->take(20)
             ->get()
             ->map(fn (SocialAccount $account) => [
                 'id' => $account->id,
@@ -535,7 +610,7 @@ class ClipperController extends Controller
                 'handle' => $account->handle,
                 'platform' => $account->platform,
                 'income' => $this->rupiah($account->income_total ?? 0),
-                'income_value' => $account->income_total ?? 0,
+                'income_value' => (int) ($account->income_total ?? 0),
             ]));
     }
 
@@ -715,10 +790,17 @@ class ClipperController extends Controller
                 'submitted_at' => $submission->submitted_at?->translatedFormat('d M Y H:i'),
                 'caption' => $submission->campaign?->title,
                 'campaign' => $submission->campaign?->title,
+                'campaign_brand' => $submission->campaign?->brand,
+                'campaign_category' => $submission->campaign?->category,
+                'campaign_rate' => $this->rupiah($submission->campaign?->rate_per_view ?? 0),
+                'campaign_rate_value' => $submission->campaign?->rate_per_view ?? 0,
+                'campaign_deadline' => $submission->campaign?->deadline_at?->translatedFormat('d M Y'),
+                'campaign_type' => $submission->campaign?->type,
                 'creator' => $submission->user?->name,
                 'account' => $submission->socialAccount?->handle,
                 'type' => $submission->campaign?->type,
                 'status' => Str::headline($submission->status),
+                'reviewed_at' => $submission->updated_at?->toIso8601String(),
                 'link' => $submission->video_url,
                 'views' => number_format($submission->views, 0, ',', '.'),
                 'views_value' => $submission->views,
@@ -740,25 +822,41 @@ class ClipperController extends Controller
 
         $submission->update($data);
 
-        // Buat income saat di-approve
+        // Buat income dan update balance saat di-approve
         if ($newStatus === 'approved' && $oldStatus !== 'approved') {
-            Income::updateOrCreate(
-                ['user_id' => $submission->user_id, 'campaign_id' => $submission->campaign_id, 'social_account_id' => $submission->social_account_id],
-                [
-                    'earned_at' => now()->toDateString(),
-                    'source' => $submission->campaign?->title ?? 'Campaign',
-                    'amount' => $submission->estimated_payout ?? 0,
-                    'status' => 'valid',
-                ]
-            );
+            $amount = $submission->estimated_payout ?? 0;
+
+            Income::create([
+                'user_id' => $submission->user_id,
+                'campaign_id' => $submission->campaign_id,
+                'social_account_id' => $submission->social_account_id,
+                'earned_at' => now()->toDateString(),
+                'source' => ($submission->campaign?->title ?? 'Campaign') . ' #' . $submission->id,
+                'amount' => $amount,
+                'status' => 'valid',
+            ]);
+
+            if ($submission->social_account_id) {
+                SocialAccount::where('id', $submission->social_account_id)
+                    ->increment('balance', $amount);
+            }
         }
 
-        // Hapus income kalau di-reject / dikembalikan dari approved
+        // Hapus income dan rollback balance kalau di-reject / dikembalikan dari approved
         if ($oldStatus === 'approved' && $newStatus !== 'approved') {
-            Income::where('user_id', $submission->user_id)
+            $income = Income::where('user_id', $submission->user_id)
                 ->where('campaign_id', $submission->campaign_id)
                 ->where('social_account_id', $submission->social_account_id)
-                ->delete();
+                ->where('source', 'like', '%#' . $submission->id)
+                ->first();
+
+            if ($income) {
+                if ($submission->social_account_id) {
+                    SocialAccount::where('id', $submission->social_account_id)
+                        ->decrement('balance', $income->amount);
+                }
+                $income->delete();
+            }
         }
 
         return response()->json(['message' => 'Submission diperbarui.']);
@@ -938,6 +1036,45 @@ class ClipperController extends Controller
         return response()->json(['message' => 'Creator dihapus.']);
     }
 
+    public function adminCreatorHistory(User $user)
+    {
+        return response()->json([
+            'creator' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'handle' => $user->handle,
+                'email' => $user->email,
+            ],
+            'incomes' => $user->incomes()
+                ->with(['socialAccount', 'campaign'])
+                ->latest('earned_at')
+                ->get()
+                ->map(fn (Income $income) => [
+                    'id' => $income->id,
+                    'date' => $income->earned_at?->translatedFormat('d M Y'),
+                    'source' => $income->source,
+                    'campaign' => $income->campaign?->title,
+                    'account' => $income->socialAccount?->handle,
+                    'amount' => $this->rupiah($income->amount),
+                    'amount_value' => $income->amount,
+                    'status' => Str::headline($income->status),
+                ]),
+            'withdrawals' => $user->withdrawals()
+                ->with('socialAccount')
+                ->latest('requested_at')
+                ->get()
+                ->map(fn (Withdrawal $withdrawal) => [
+                    'id' => $withdrawal->id,
+                    'date' => $withdrawal->requested_at?->translatedFormat('d M Y H:i'),
+                    'account' => $withdrawal->bank_name.' '.$withdrawal->bank_account_number,
+                    'social_account' => $withdrawal->socialAccount?->handle,
+                    'amount' => $this->rupiah($withdrawal->amount),
+                    'amount_value' => $withdrawal->amount,
+                    'status' => Str::headline($withdrawal->status),
+                ]),
+        ]);
+    }
+
     public function adminPayouts()
     {
         $incomes = Income::query()
@@ -957,7 +1094,7 @@ class ClipperController extends Controller
             ]);
 
         $withdrawals = Withdrawal::query()
-            ->with('user')
+            ->with(['user', 'socialAccount'])
             ->latest('requested_at')
             ->get()
             ->map(fn (Withdrawal $withdrawal) => [
@@ -966,28 +1103,72 @@ class ClipperController extends Controller
                 'source' => 'Withdraw Request',
                 'creator' => $withdrawal->user?->name,
                 'account' => $withdrawal->bank_name.' '.$withdrawal->bank_account_number,
+                'social_account' => $withdrawal->socialAccount?->handle,
                 'amount' => $this->rupiah($withdrawal->amount),
                 'amount_value' => $withdrawal->amount,
                 'status' => Str::headline($withdrawal->status),
+                'reviewed_at' => $withdrawal->updated_at?->toIso8601String(),
                 'type' => 'Withdrawal',
             ]);
 
+        $totalIncome = $incomes->where('status', 'Valid')->sum('amount_value');
+        $totalProcessedWithdrawals = $withdrawals
+            ->whereIn('status', ['Requested', 'Approved', 'Paid'])
+            ->sum('amount_value');
+        $totalPaidWithdrawals = $withdrawals
+            ->where('status', 'Paid')
+            ->sum('amount_value');
+
         return response()->json([
-            'total_income' => $this->rupiah($incomes->where('status', 'Valid')->sum('amount_value')),
-            'total_requested' => $this->rupiah($withdrawals->sum('amount_value')),
+            'total_income' => $this->rupiah($totalIncome),
+            'total_requested' => $this->rupiah($totalPaidWithdrawals),
+            'total_remaining' => $this->rupiah(max(0, $totalIncome - $totalProcessedWithdrawals)),
             'items' => $incomes->concat($withdrawals)->sortByDesc('date')->values(),
         ]);
     }
 
     public function updateAdminPayout(Request $request, string $payout)
     {
-        $data = $request->validate(['status' => ['required', 'string', 'max:255']]);
+        $data = $request->validate(['status' => ['required', Rule::in(['requested', 'approved', 'rejected', 'paid'])]]);
         [$type, $id] = explode('-', $payout, 2);
 
         if ($type === 'income') {
             Income::findOrFail($id)->update($data);
         } elseif ($type === 'withdrawal') {
-            Withdrawal::findOrFail($id)->update($data);
+            $withdrawal = Withdrawal::findOrFail($id);
+            $oldStatus = strtolower($withdrawal->status);
+            $newStatus = strtolower($data['status']);
+
+            abort_if($oldStatus === 'paid', 422, 'Pengajuan yang sudah selesai tidak bisa diubah.');
+            abort_if($newStatus === 'paid' && $oldStatus !== 'approved', 422, 'Pengajuan harus disetujui sebelum diselesaikan.');
+            abort_if(in_array($newStatus, ['approved', 'rejected'], true) && $oldStatus !== 'requested', 422, 'Pengajuan ini sudah direview.');
+            abort_if($newStatus === 'requested' && ! in_array($oldStatus, ['approved', 'rejected'], true), 422, 'Status ini tidak bisa dibatalkan.');
+            abort_if(
+                $newStatus === 'requested' && $withdrawal->updated_at?->lt(now()->subDay()),
+                422,
+                'Pengajuan hanya bisa dibatalkan dalam 24 jam setelah review.',
+            );
+
+            if ($newStatus === 'approved' && $oldStatus !== 'approved') {
+                $account = $withdrawal->socialAccount ?: $this->withdrawalSocialAccount($withdrawal);
+
+                if ($account) {
+                    $account->update([
+                        'balance' => max(0, $account->balance - $withdrawal->amount),
+                    ]);
+                    $withdrawal->social_account_id = $account->id;
+                }
+            }
+
+            if ($oldStatus === 'approved' && $newStatus === 'requested') {
+                $account = $withdrawal->socialAccount ?: $this->withdrawalSocialAccount($withdrawal);
+
+                if ($account) {
+                    $account->increment('balance', $withdrawal->amount);
+                }
+            }
+
+            $withdrawal->update($data);
         } else {
             abort(404);
         }
@@ -1002,7 +1183,11 @@ class ClipperController extends Controller
         if ($type === 'income') {
             Income::findOrFail($id)->delete();
         } elseif ($type === 'withdrawal') {
-            Withdrawal::findOrFail($id)->delete();
+            $withdrawal = Withdrawal::findOrFail($id);
+
+            abort_if(strtolower($withdrawal->status) === 'paid', 422, 'Pengajuan yang sudah selesai tidak bisa dihapus.');
+
+            $withdrawal->delete();
         } else {
             abort(404);
         }
@@ -1030,7 +1215,18 @@ class ClipperController extends Controller
             'message' => ['required', 'string'],
         ]);
 
-        $message = AdminMessage::create(['user_id' => $this->currentUser($request)->id, ...$data, 'status' => 'processing']);
+        $user = $this->currentUser($request);
+        $message = AdminMessage::create(['user_id' => $user->id, ...$data, 'status' => 'processing']);
+
+        $this->notifyAdmins(
+            'support_ticket',
+            'Log tiket baru',
+            "{$user->name} mengirim tiket: {$message->subject}.",
+            [
+                'ticket_id' => $message->id,
+                'user_id' => $user->id,
+            ],
+        );
 
         return response()->json(['message' => 'Pesan terkirim ke admin.', 'ticket' => $message], 201);
     }
@@ -1095,6 +1291,15 @@ class ClipperController extends Controller
             ->notifications()
             ->whereNull('read_at')
             ->update(['read_at' => now()]);
+
+        return response()->json(['message' => 'Notifikasi ditandai sudah dibaca.']);
+    }
+
+    public function markNotificationRead(Request $request, AppNotification $notification)
+    {
+        abort_unless($notification->user_id === $this->currentUser($request)->id, 404);
+
+        $notification->update(['read_at' => $notification->read_at ?: now()]);
 
         return response()->json(['message' => 'Notifikasi ditandai sudah dibaca.']);
     }
@@ -1421,6 +1626,16 @@ class ClipperController extends Controller
             ->first();
     }
 
+    private function withdrawalSocialAccount(Withdrawal $withdrawal): ?SocialAccount
+    {
+        return $withdrawal->user?->socialAccounts()
+            ->wherePivot('status', 'active')
+            ->where('bank_name', $withdrawal->bank_name)
+            ->where('bank_account_number', $withdrawal->bank_account_number)
+            ->where('bank_account_name', $withdrawal->bank_account_name)
+            ->first();
+    }
+
     private function ensureMainSocialAccount(User $user): SocialAccount
     {
         $socialAccount = SocialAccount::firstOrCreate(
@@ -1457,6 +1672,13 @@ class ClipperController extends Controller
             'body' => $body,
             'data' => $data,
         ]);
+    }
+
+    private function notifyAdmins(string $type, string $title, ?string $body = null, array $data = []): void
+    {
+        User::whereIn('role', ['admin', 'brand'])
+            ->get()
+            ->each(fn (User $admin) => $this->notifyUser($admin, $type, $title, $body, $data));
     }
 
     private function campaignPayload(Campaign $campaign, bool $detail = false, ?User $user = null): array
