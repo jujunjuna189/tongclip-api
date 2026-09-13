@@ -735,7 +735,31 @@ class ClipperController extends Controller
             'estimated_payout' => ['sometimes', 'integer', 'min:0'],
         ]);
 
+        $oldStatus = strtolower($submission->status);
+        $newStatus = strtolower($data['status']);
+
         $submission->update($data);
+
+        // Buat income saat di-approve
+        if ($newStatus === 'approved' && $oldStatus !== 'approved') {
+            Income::updateOrCreate(
+                ['user_id' => $submission->user_id, 'campaign_id' => $submission->campaign_id, 'social_account_id' => $submission->social_account_id],
+                [
+                    'earned_at' => now()->toDateString(),
+                    'source' => $submission->campaign?->title ?? 'Campaign',
+                    'amount' => $submission->estimated_payout ?? 0,
+                    'status' => 'valid',
+                ]
+            );
+        }
+
+        // Hapus income kalau di-reject / dikembalikan dari approved
+        if ($oldStatus === 'approved' && $newStatus !== 'approved') {
+            Income::where('user_id', $submission->user_id)
+                ->where('campaign_id', $submission->campaign_id)
+                ->where('social_account_id', $submission->social_account_id)
+                ->delete();
+        }
 
         return response()->json(['message' => 'Submission diperbarui.']);
     }
@@ -860,7 +884,7 @@ class ClipperController extends Controller
     {
         $data = $request->validate([
             'name' => ['sometimes', 'string', 'max:255'],
-            'email' => ['sometimes', 'email', Rule::unique('users', 'email')->ignore($user->id), Rule::unique('social_accounts', 'email')],
+            'email' => ['sometimes', 'email', Rule::unique('users', 'email')->ignore($user->id), Rule::unique('social_accounts', 'email')->where(fn ($query) => $query->whereNotIn('id', $user->socialAccounts()->pluck('social_accounts.id')))],
             'handle' => ['sometimes', 'nullable', 'string', 'max:255'],
             'avatar' => ['sometimes', 'nullable', 'image', 'max:2048'],
             'password' => ['sometimes', 'nullable', 'string', 'min:8'],
