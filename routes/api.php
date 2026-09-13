@@ -16,6 +16,7 @@ Route::prefix('v1')->group(function (): void {
     Route::get('/incomes', [ClipperController::class, 'incomes']);
     Route::get('/income-summary', [ClipperController::class, 'incomeSummary']);
     Route::post('/withdrawals', [ClipperController::class, 'requestWithdrawal']);
+    Route::post('/social-accounts', [ClipperController::class, 'createSocialAccount']);
     Route::post('/profile', [ClipperController::class, 'updateProfile']);
     Route::patch('/profile', [ClipperController::class, 'updateProfile']);
     Route::get('/leaderboard', [ClipperController::class, 'leaderboard']);

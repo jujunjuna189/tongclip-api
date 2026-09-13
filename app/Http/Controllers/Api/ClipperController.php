@@ -17,7 +17,6 @@ use App\Models\Withdrawal;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -185,7 +184,7 @@ class ClipperController extends Controller
                 'status' => Str::headline($user->status),
                 'balance' => $this->rupiah($validIncome),
                 'balance_value' => $validIncome,
-                'avatar_url' => $primaryAccount?->avatar_url,
+                'avatar_url' => $this->publicAssetUrl($primaryAccount?->avatar_url),
                 'bank_name' => $primaryAccount?->bank_name,
                 'bank_account_number' => $primaryAccount?->bank_account_number,
                 'bank_account_name' => $primaryAccount?->bank_account_name,
@@ -198,7 +197,7 @@ class ClipperController extends Controller
                 'status' => Str::headline($account->status),
                 'balance' => $this->rupiah($account->balance),
                 'balance_value' => $account->balance,
-                'avatar_url' => $account->avatar_url,
+                'avatar_url' => $this->publicAssetUrl($account->avatar_url),
                 'bank_name' => $account->bank_name,
                 'bank_account_number' => $account->bank_account_number,
                 'bank_account_name' => $account->bank_account_name,
@@ -406,6 +405,46 @@ class ClipperController extends Controller
         return response()->json(['message' => 'Permintaan withdraw dibuat.', 'withdrawal' => $withdrawal], 201);
     }
 
+    public function createSocialAccount(Request $request)
+    {
+        $user = $this->currentUser($request);
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'email' => ['nullable', 'email', 'unique:users,email', 'unique:social_accounts,email'],
+            'handle' => ['required', 'string', 'max:255'],
+            'platform' => ['required', 'string', 'max:255'],
+            'avatar_url' => ['nullable', 'string', 'max:2048'],
+            'bank_name' => ['nullable', 'string', 'max:255'],
+            'bank_account_number' => ['nullable', 'string', 'max:255'],
+            'bank_account_name' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $data['handle'] = '@'.ltrim($data['handle'], '@');
+
+        if (
+            User::where('handle', $data['handle'])->exists()
+            || SocialAccount::where('handle', $data['handle'])->exists()
+        ) {
+            throw ValidationException::withMessages(['handle' => 'Handle sudah digunakan.']);
+        }
+
+        $account = SocialAccount::create([
+            ...$data,
+            'status' => 'active',
+            'balance' => 0,
+        ]);
+
+        $user->socialAccounts()->attach($account->id, [
+            'access_type' => 'owner',
+            'status' => 'active',
+        ]);
+
+        return response()->json([
+            'message' => 'Social account ditambahkan.',
+            'account' => $account,
+        ], 201);
+    }
+
     public function updateProfile(Request $request)
     {
         $user = $this->currentUser($request);
@@ -439,7 +478,7 @@ class ClipperController extends Controller
 
         if ($request->hasFile('avatar')) {
             $path = $request->file('avatar')->store('avatars', 'public');
-            $accountData['avatar_url'] = Storage::disk('public')->url($path);
+            $accountData['avatar_url'] = $this->publicStoragePath($path);
         }
 
         if ($userData) {
@@ -491,31 +530,34 @@ class ClipperController extends Controller
 
     public function courses()
     {
-        return response()->json(Course::latest()->get());
+        return response()->json(Course::latest()->get()->map(fn (Course $course) => $this->coursePayload($course)));
     }
 
     public function adminCourses()
     {
-        return response()->json(Course::latest()->get());
+        return response()->json(Course::latest()->get()->map(fn (Course $course) => $this->coursePayload($course)));
     }
 
     public function createAdminCourse(Request $request)
     {
         $data = $this->validateCourse($request);
+        $this->storeCourseImage($request, $data);
 
         return response()->json([
             'message' => 'Course dibuat.',
-            'course' => Course::create($data),
+            'course' => $this->coursePayload(Course::create($data)),
         ], 201);
     }
 
     public function updateAdminCourse(Request $request, Course $course)
     {
-        $course->update($this->validateCourse($request, true));
+        $data = $this->validateCourse($request, true);
+        $this->storeCourseImage($request, $data);
+        $course->update($data);
 
         return response()->json([
             'message' => 'Course diperbarui.',
-            'course' => $course->refresh(),
+            'course' => $this->coursePayload($course->refresh()),
         ]);
     }
 
@@ -573,7 +615,7 @@ class ClipperController extends Controller
         }
 
         if ($request->hasFile('hero_image')) {
-            $data['image_url'] = Storage::disk('public')->url($request->file('hero_image')->store('campaigns', 'public'));
+            $data['image_url'] = $this->publicStoragePath($request->file('hero_image')->store('campaigns', 'public'));
         }
 
         unset($data['hero_image']);
@@ -628,7 +670,7 @@ class ClipperController extends Controller
         ]);
 
         if ($request->hasFile('hero_image')) {
-            $data['image_url'] = Storage::disk('public')->url($request->file('hero_image')->store('campaigns', 'public'));
+            $data['image_url'] = $this->publicStoragePath($request->file('hero_image')->store('campaigns', 'public'));
         }
 
         unset($data['hero_image']);
@@ -718,6 +760,7 @@ class ClipperController extends Controller
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'email', 'unique:users,email', 'unique:social_accounts,email'],
             'handle' => ['required', 'string', 'max:255'],
+            'avatar' => ['nullable', 'image', 'max:2048'],
             'password' => ['required', 'string', 'min:8'],
             'status' => ['required', 'string', 'max:255'],
             'bank_name' => ['nullable', 'string', 'max:255'],
@@ -726,8 +769,13 @@ class ClipperController extends Controller
         ]);
 
         $accountData = collect($data)->only(['bank_name', 'bank_account_number', 'bank_account_name'])->all();
-        $userData = collect($data)->except(['bank_name', 'bank_account_number', 'bank_account_name'])->all();
+        $userData = collect($data)->except(['avatar', 'bank_name', 'bank_account_number', 'bank_account_name'])->all();
         $userData['handle'] = '@'.ltrim($userData['handle'], '@');
+
+        if ($request->hasFile('avatar')) {
+            $path = $request->file('avatar')->store('avatars', 'public');
+            $accountData['avatar_url'] = $this->publicStoragePath($path);
+        }
 
         if (
             User::where('handle', $userData['handle'])->exists()
@@ -878,7 +926,7 @@ class ClipperController extends Controller
     public function course(Course $course)
     {
         return response()->json([
-            ...$course->toArray(),
+            ...$this->coursePayload($course),
             'lessons' => $course->lessons ?: [[
                 'title' => $course->title,
                 'duration' => $course->duration,
@@ -1255,7 +1303,7 @@ class ClipperController extends Controller
             'role' => $user->role,
             'status' => $user->status,
             'onboarding_completed' => $user->onboarding_completed,
-            'avatar_url' => $account?->avatar_url,
+            'avatar_url' => $this->publicAssetUrl($account?->avatar_url),
             'bank_name' => $account?->bank_name,
             'bank_account_number' => $account?->bank_account_number,
             'bank_account_name' => $account?->bank_account_name,
@@ -1343,7 +1391,7 @@ class ClipperController extends Controller
             'slug' => $campaign->slug,
             'title' => $campaign->title,
             'brand' => $campaign->brand,
-            'image' => $campaign->image_url,
+            'image' => $this->publicAssetUrl($campaign->image_url),
             'rate' => $this->rupiah($campaign->rate_per_view),
             'rate_value' => $campaign->rate_per_view,
             'category' => $campaign->category,
@@ -1378,6 +1426,14 @@ class ClipperController extends Controller
         return $payload;
     }
 
+    private function coursePayload(Course $course): array
+    {
+        return [
+            ...$course->toArray(),
+            'image_url' => $this->publicAssetUrl($course->image_url),
+        ];
+    }
+
     private function validateCourse(Request $request, bool $partial = false): array
     {
         $required = $partial ? 'sometimes' : 'required';
@@ -1386,6 +1442,7 @@ class ClipperController extends Controller
             'title' => [$required, 'string', 'max:255'],
             'description' => [$required, 'string'],
             'image_url' => ['nullable', 'string', 'max:2048'],
+            'cover_image' => ['nullable', 'image', 'max:4096'],
             'duration' => ['nullable', 'string', 'max:255'],
             'level' => ['nullable', 'string', 'max:255'],
             'url' => ['nullable', 'string', 'max:2048'],
@@ -1398,8 +1455,35 @@ class ClipperController extends Controller
         ]);
     }
 
+    private function storeCourseImage(Request $request, array &$data): void
+    {
+        if ($request->hasFile('cover_image')) {
+            $data['image_url'] = $this->publicStoragePath($request->file('cover_image')->store('courses', 'public'));
+        }
+
+        unset($data['cover_image']);
+    }
+
     private function rupiah(int|float $amount): string
     {
         return 'Rp'.number_format($amount, 0, ',', '.');
+    }
+
+    private function publicStoragePath(string $path): string
+    {
+        return '/storage/'.ltrim($path, '/');
+    }
+
+    private function publicAssetUrl(?string $path): ?string
+    {
+        if (! $path) {
+            return null;
+        }
+
+        if (Str::startsWith($path, ['http://', 'https://'])) {
+            return $path;
+        }
+
+        return rtrim(request()->getSchemeAndHttpHost(), '/').'/'.ltrim($path, '/');
     }
 }
