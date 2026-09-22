@@ -17,6 +17,7 @@ use Illuminate\Notifications\Notifiable;
     'handle',
     'role',
     'status',
+    'rejection_note',
     'onboarding_completed',
     'api_token',
 ])]

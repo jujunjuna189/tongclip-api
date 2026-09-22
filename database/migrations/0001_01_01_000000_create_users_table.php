@@ -18,6 +18,7 @@ return new class extends Migration
             $table->string('handle')->nullable()->unique();
             $table->string('role')->default('creator');
             $table->string('status')->default('review');
+            $table->text('rejection_note')->nullable();
             $table->boolean('onboarding_completed')->default(false);
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');

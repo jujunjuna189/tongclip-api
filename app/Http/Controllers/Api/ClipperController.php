@@ -83,6 +83,11 @@ class ClipperController extends Controller
             'email' => ['required', 'email', 'unique:users,email', 'unique:social_accounts,email'],
             'password' => ['required', 'string', 'min:8'],
             'handle' => ['nullable', 'string', 'max:255'],
+            'whatsapp_number' => ['required', 'string', 'max:32'],
+            'social_accounts' => ['required', 'array', 'min:1'],
+            'social_accounts.*.platform' => ['required', Rule::in(['tiktok', 'instagram', 'youtube', 'facebook'])],
+            'social_accounts.*.handle' => ['required', 'string', 'max:255'],
+            'social_accounts.*.social_url' => ['required', 'url', 'max:2048'],
         ]);
         $handle = $data['handle'] ?? Str::before($data['email'], '@');
         $data['handle'] = '@'.ltrim($handle, '@');
@@ -94,15 +99,64 @@ class ClipperController extends Controller
             throw ValidationException::withMessages(['handle' => 'Handle sudah digunakan.']);
         }
 
-        $user = User::create([
-            ...$data,
-            'password' => Hash::make($data['password']),
-            'status' => 'review',
-            'role' => 'creator',
-            'onboarding_completed' => false,
-            'api_token' => Str::random(60),
-        ]);
-        $this->ensureMainSocialAccount($user);
+        $socialAccounts = collect($data['social_accounts'])->map(function (array $account) {
+            $account['handle'] = '@'.ltrim(trim($account['handle']), '@');
+            return $account;
+        });
+        if ($socialAccounts->first()['platform'] !== 'tiktok') {
+            throw ValidationException::withMessages(['social_accounts' => 'Akun sosial pertama harus TikTok.']);
+        }
+        $handles = $socialAccounts->pluck('handle');
+        if ($handles->contains('@')
+            || $handles->unique()->count() !== $handles->count()
+            || SocialAccount::whereIn('handle', $handles)->exists()
+            || User::whereIn('handle', $handles)->exists()) {
+            throw ValidationException::withMessages(['social_accounts' => 'Username akun sosial harus unik dan belum digunakan.']);
+        }
+
+        $user = DB::transaction(function () use ($data, $socialAccounts) {
+            $user = User::create([
+                'name' => $data['name'],
+                'email' => $data['email'],
+                'handle' => $data['handle'],
+                'password' => Hash::make($data['password']),
+                'status' => 'review',
+                'role' => 'creator',
+                'onboarding_completed' => false,
+                'api_token' => Str::random(60),
+            ]);
+            foreach ($socialAccounts as $index => $accountData) {
+                $account = SocialAccount::create([
+                    'name' => $data['name'].' '.ucfirst($accountData['platform']),
+                    'handle' => $accountData['handle'],
+                    'platform' => $accountData['platform'],
+                    'social_url' => $accountData['social_url'],
+                    'whatsapp_number' => $index === 0 ? $data['whatsapp_number'] : null,
+                    'status' => 'review',
+                    'balance' => 0,
+                ]);
+                $user->socialAccounts()->attach($account->id, [
+                    'access_type' => 'member',
+                    'status' => 'active',
+                ]);
+            }
+            return $user;
+        });
+
+        $activeBrands = Brand::where('status', 'active')->get();
+        if ($activeBrands->count() === 1) {
+            $brand = $activeBrands->first();
+            $brand->members()->syncWithoutDetaching([
+                $user->id => ['access_type' => 'member', 'status' => 'pending'],
+            ]);
+            $this->notifyUser(
+                $brand->owner,
+                'brand_join_request',
+                'Pendaftaran creator baru',
+                "{$user->name} mendaftar dan menunggu persetujuan untuk bergabung ke {$brand->name}.",
+                ['brand_id' => $brand->id, 'user_id' => $user->id],
+            );
+        }
 
         return response()->json(['token' => $user->api_token, 'user' => $this->userPayload($user)], 201);
     }
@@ -115,6 +169,11 @@ class ClipperController extends Controller
     public function dashboard(Request $request)
     {
         $user = $this->currentUser($request);
+        abort_if(
+            $user->role === 'creator' && $user->status !== 'active',
+            403,
+            'Akun masih dalam proses peninjauan.',
+        );
         $userAccountId = -$user->id;
         $accounts = $user->socialAccounts()
             ->wherePivot('status', 'active')
@@ -195,6 +254,8 @@ class ClipperController extends Controller
                 'bank_name' => $primaryAccount?->bank_name,
                 'bank_account_number' => $primaryAccount?->bank_account_number,
                 'bank_account_name' => $primaryAccount?->bank_account_name,
+                'whatsapp_number' => $primaryAccount?->whatsapp_number,
+                'social_url' => $primaryAccount?->social_url,
                 'type' => 'user',
                 'access_type' => 'owner',
             ]])->merge($accounts->map(fn ($account) => [
@@ -209,6 +270,8 @@ class ClipperController extends Controller
                 'bank_name' => $account->bank_name,
                 'bank_account_number' => $account->bank_account_number,
                 'bank_account_name' => $account->bank_account_name,
+                'whatsapp_number' => $account->whatsapp_number,
+                'social_url' => $account->social_url,
                 'type' => 'social_account',
                 'access_type' => $account->pivot?->access_type ?: 'member',
             ]))->values(),
@@ -504,6 +567,8 @@ class ClipperController extends Controller
             'bank_name' => ['nullable', 'string', 'max:255'],
             'bank_account_number' => ['nullable', 'string', 'max:255'],
             'bank_account_name' => ['nullable', 'string', 'max:255'],
+            'whatsapp_number' => ['nullable', 'string', 'max:32'],
+            'social_url' => ['nullable', 'url', 'max:2048'],
         ]);
 
         $data['handle'] = '@'.ltrim($data['handle'], '@');
@@ -889,6 +954,7 @@ class ClipperController extends Controller
                     'handle' => $user->handle,
                     'role' => $user->role,
                     'status' => Str::headline($user->status),
+                    'rejection_note' => $user->rejection_note,
                     'accounts_count' => $user->social_accounts_count,
                     'submissions_count' => $user->submissions_count,
                     'income' => $this->rupiah($user->income_total ?? 0),
@@ -897,6 +963,17 @@ class ClipperController extends Controller
                     'bank_name' => $primaryAccount?->bank_name,
                     'bank_account_number' => $primaryAccount?->bank_account_number,
                     'bank_account_name' => $primaryAccount?->bank_account_name,
+                    'whatsapp_number' => $primaryAccount?->whatsapp_number,
+                    'social_url' => $primaryAccount?->social_url,
+                    'submitted_social_accounts' => $user->socialAccounts
+                        ->filter(fn (SocialAccount $account) => filled($account->social_url))
+                        ->map(fn (SocialAccount $account) => [
+                            'id' => $account->id,
+                            'platform' => $account->platform,
+                            'handle' => $account->handle,
+                            'social_url' => $account->social_url,
+                            'status' => $account->status,
+                        ])->values(),
                 ];
             }));
     }
@@ -980,13 +1057,15 @@ class ClipperController extends Controller
 
     public function updateAdminCreator(Request $request, User $user)
     {
+        $previousStatus = $user->status;
         $data = $request->validate([
             'name' => ['sometimes', 'string', 'max:255'],
             'email' => ['sometimes', 'email', Rule::unique('users', 'email')->ignore($user->id), Rule::unique('social_accounts', 'email')->where(fn ($query) => $query->whereNotIn('id', $user->socialAccounts()->pluck('social_accounts.id')))],
             'handle' => ['sometimes', 'nullable', 'string', 'max:255'],
             'avatar' => ['sometimes', 'nullable', 'image', 'max:2048'],
             'password' => ['sometimes', 'nullable', 'string', 'min:8'],
-            'status' => ['sometimes', 'string', 'max:255'],
+            'status' => ['sometimes', Rule::in(['review', 'active', 'rejected', 'blocked'])],
+            'rejection_note' => ['nullable', 'string', 'max:2000', 'required_if:status,rejected'],
             'bank_name' => ['sometimes', 'nullable', 'string', 'max:255'],
             'bank_account_number' => ['sometimes', 'nullable', 'string', 'max:255'],
             'bank_account_name' => ['sometimes', 'nullable', 'string', 'max:255'],
@@ -1014,6 +1093,15 @@ class ClipperController extends Controller
         $accountData = collect($data)->only(['bank_name', 'bank_account_number', 'bank_account_name'])->all();
         $userData = collect($data)->except(['avatar', 'bank_name', 'bank_account_number', 'bank_account_name'])->all();
 
+        if (($userData['status'] ?? null) === 'active') {
+            $userData['onboarding_completed'] = true;
+            $userData['rejection_note'] = null;
+        } elseif (($userData['status'] ?? null) === 'rejected') {
+            $userData['onboarding_completed'] = false;
+        } elseif (($userData['status'] ?? null) === 'review') {
+            $userData['rejection_note'] = null;
+        }
+
         if ($request->hasFile('avatar')) {
             $path = $request->file('avatar')->store('avatars', 'public');
             $accountData['avatar_url'] = $this->publicStoragePath($path);
@@ -1021,9 +1109,39 @@ class ClipperController extends Controller
 
         $user->update($userData);
 
+        if (array_key_exists('status', $userData)) {
+            $brandMembershipStatus = $userData['status'] === 'active'
+                ? 'active'
+                : (in_array($userData['status'], ['rejected', 'blocked'], true) ? 'rejected' : 'pending');
+            $user->brands()->pluck('brands.id')->each(
+                fn ($brandId) => $user->brands()->updateExistingPivot($brandId, ['status' => $brandMembershipStatus]),
+            );
+            if ($userData['status'] === 'active') {
+                $user->socialAccounts()->where('social_accounts.status', 'review')->update(['social_accounts.status' => 'active']);
+            }
+        }
+
         $primaryAccount = $this->primarySocialAccount($user);
         if ($primaryAccount && $accountData) {
             $primaryAccount->update($accountData);
+        }
+
+        if ($previousStatus !== 'active' && $user->status === 'active') {
+            $this->notifyUser(
+                $user,
+                'creator_approved',
+                'Pendaftaran disetujui',
+                'Akun kamu sudah aktif. Selamat datang di Tongkrongan Clipper!',
+            );
+        }
+
+        if ($previousStatus !== 'rejected' && $user->status === 'rejected') {
+            $this->notifyUser(
+                $user,
+                'creator_rejected',
+                'Pendaftaran belum disetujui',
+                $user->rejection_note,
+            );
         }
 
         return response()->json(['message' => 'Creator diperbarui.', 'creator' => $this->userPayload($user->refresh())]);
@@ -1594,6 +1712,7 @@ class ClipperController extends Controller
             'handle' => $user->handle,
             'role' => $user->role,
             'status' => $user->status,
+            'rejection_note' => $user->rejection_note,
             'onboarding_completed' => $user->onboarding_completed,
             'avatar_url' => $this->publicAssetUrl($account?->avatar_url),
             'bank_name' => $account?->bank_name,

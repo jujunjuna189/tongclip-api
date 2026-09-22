@@ -14,6 +14,8 @@ return new class extends Migration
             $table->string('email')->nullable()->unique();
             $table->string('handle')->unique();
             $table->string('platform')->default('tiktok');
+            $table->string('whatsapp_number', 32)->nullable();
+            $table->string('social_url', 2048)->nullable();
             $table->string('status')->default('review');
             $table->string('avatar_url')->nullable();
             $table->string('bank_name')->nullable();
@@ -103,6 +105,7 @@ return new class extends Migration
         Schema::create('withdrawals', function (Blueprint $table): void {
             $table->id();
             $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('social_account_id')->nullable()->constrained()->nullOnDelete();
             $table->unsignedBigInteger('amount');
             $table->string('bank_name');
             $table->string('bank_account_number');
