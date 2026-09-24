@@ -859,6 +859,8 @@ class ClipperController extends Controller
                 'campaign_category' => $submission->campaign?->category,
                 'campaign_rate' => $this->rupiah($submission->campaign?->rate_per_view ?? 0),
                 'campaign_rate_value' => $submission->campaign?->rate_per_view ?? 0,
+                'campaign_views_target' => number_format($submission->campaign?->views_target ?? 0, 0, ',', '.'),
+                'campaign_views_target_value' => $submission->campaign?->views_target ?? 0,
                 'campaign_deadline' => $submission->campaign?->deadline_at?->translatedFormat('d M Y'),
                 'campaign_type' => $submission->campaign?->type,
                 'creator' => $submission->user?->name,
